@@ -1,78 +1,159 @@
-**README.md**
-```
-# DirHunter AI
+# 📘 DirHunter AI – README
 
-An advanced AI-driven fuzzing, filtering, and reporting pipeline for endpoint discovery and analysis.
+An advanced AI-powered fuzzing + reporting tool that integrates with Slack, sends threaded alerts, and serves live HTML reports (via ngrok or your server).
 
-## Features
-- ✨ FFUF-based fuzzing (with rate limits & retries)
-- 🛡 Soft-404 filtering and heuristic exclusions
-- 🔐 Hash-based change detection to reduce repeat noise
-- ⚙ Parallelized screenshot capture
-- 🧠 GPT-4 Vision tagging & category classification
-- 🔍 Tag validation rules to auto-correct mislabels
-- 📢 Slack integration for high-signal alerts
-- 📄 HTML, CSV, and log report outputs
+---
 
-## Setup
-1. Clone the repo:
-   ```bash
-   git clone https://github.com/yourname/dirhunter_ai.git
-   cd dirhunter_ai
-   ```
+## 🚀 Features
 
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+✅ AI screenshot tagging (via GPT-4 Vision)  
+✅ High-signal filtering (hash + heuristics)  
+✅ Parallel screenshot workers  
+✅ Slack `/dirscan` slash command  
+✅ Threaded Slack replies on scan completion  
+✅ Live HTML reports + screenshot server  
+✅ Background DB tracking (only alerts on new/changed findings)
 
-3. Configure `.env` for your OpenAI and Slack webhook keys.
+---
 
-4. Provide your target domains in `domain.txt`.
+## 🏗 Project Layout
 
-## Usage
-Run a full scan:
-```bash
-python main.py --screenshot-workers 5
-```
-
-To reset the hash DB:
-```bash
-python main.py --reset-db
-```
-
-To ignore existing hashes and force fresh scan:
-```bash
-python main.py --ignore-hash
-```
-
-## Project Layout
 ```
 dirhunter_ai/
-|-- main.py             # entry point
-|-- config.py           # settings, API keys, paths
-|-- utils/
-|   |-- scanner.py      # FFUF runner
-|   |-- filters.py      # soft-404, pattern, cluster filtering
-|   |-- screenshot.py   # parallel screenshot module
-|   |-- ai_analyzer.py  # GPT-4 Vision interface
-|   |-- slack_alert.py  # Slack integration
-|   |-- reporter.py     # HTML + summary reports
-|   |-- db_handler.py   # SQLite hash DB
-|   |-- tag_validator.py# rule-based tag corrections
-|-- results/            # output screenshots, raw data
-|-- logs/               # run logs + summaries
-|-- wordlists/          # wordlists for fuzzing
-|-- domain.txt          # list of domains to scan
-|-- .env                # secrets + keys (excluded)
-|-- .gitignore
-|-- README.md
+├── main.py                 # main CLI entry
+├── slack_dirscan_app.py    # Flask Slack app (slash command handler)
+├── config.py               # config (wordlist, dirs)
+├── utils/                 
+│   ├── ai_analyzer.py      # GPT-4 Vision tagging
+│   ├── db_handler.py       # hash DB
+│   ├── filters.py          # filtering + clustering
+│   ├── reporter.py         # HTML report generator
+│   ├── scanner.py          # FFUF runner
+│   ├── screenshot.py       # parallel Selenium screenshots
+│   ├── slack_alert.py      # Slack grouped alerts
+│   └── tag_validator.py    # tag rule enforcement
+├── wordlists/             
+│   └── common.txt          # fuzzing wordlist
+├── results/               
+│   ├── html/               # generated reports
+│   └── screenshots/        # captured screenshots
+├── logs/                  
+│   └── *.txt               # run summaries + skipped lists
+├── .env                   # secrets + config
+└── README.md
 ```
 
-## Contribution
-Pull requests welcome! Please open an issue first if making large changes.
+---
 
-## License
-MIT License © 2025 Your Name
+## ⚙ Prerequisites
+
+- Python 3.10+
+- `ffuf` installed and available in `$PATH`
+- Slack app with:
+  - Bot Token (`SLACK_BOT_TOKEN`)
+  - Slash Command (`/dirscan`)
+  - Permissions: `chat:write`, `commands`
+
+---
+
+## 🔧 Environment Setup
+
+Create `.env`:
+
 ```
+SLACK_BOT_TOKEN=xoxb-...
+WEBHOOK_URL=https://hooks.slack.com/services/...
+REPORT_BASE_URL=https://<your-ngrok-or-server>
+NGROK_URL=https://<your-ngrok>
+```
+
+Install requirements:
+
+```
+pip install -r requirements.txt
+```
+
+---
+
+## 🏃 Running CLI
+
+```
+python main.py --domains domain.txt --ignore-hash --screenshot-workers 10
+```
+
+Or single domain:
+
+```
+python main.py --domains example.com
+```
+
+---
+
+## 🤖 Running Slack Slash Command
+
+1️⃣ Run the Flask app:
+
+```
+python slack_dirscan_app.py
+```
+
+2️⃣ Expose it via ngrok:
+
+```
+ngrok http 31337
+```
+
+3️⃣ Configure your Slack app `/dirscan` to point to:
+
+```
+https://<ngrok>/slack/dirscan
+```
+
+4️⃣ In Slack:
+
+```
+/dirscan example.com --ignore-hash --screenshot-workers 10
+```
+
+✅ It replies immediately: "Fuzzing started..."  
+✅ Once complete, posts results in a thread.
+
+---
+
+## 📊 Reports
+
+- Accessible at:
+  
+```
+https://<ngrok>/reports/<domain>.html
+```
+
+- Screenshots served at:
+
+```
+https://<ngrok>/screenshots/<image>
+```
+
+---
+
+## 🛡 Permissions Needed
+
+Slack Bot:
+
+- `chat:write`
+- `commands`
+
+Make sure your bot is installed in the workspace and has access to the channels you want to use.
+
+---
+
+## ❤️ Contributing
+
+Feel free to suggest improvements, add new AI tagging categories, or submit PRs for integration with other platforms (Discord, Teams, etc.)!
+
+---
+
+## 📬 Contact
+
+If you need help or want custom setups, reach out to the maintainer.
 
