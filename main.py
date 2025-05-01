@@ -11,7 +11,7 @@ from config import WORDLIST, EXTENSIONS, THREADS, SCREENSHOT_DIR, RAW_RESULTS_DI
 from dotenv  import load_dotenv
 
 load_dotenv(override=True)
-WEBHOOK_URL = os.getenv.load("WEBHOOK_URL")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 # ─────────── LOGGING SETUP ───────────
 logging.basicConfig(
