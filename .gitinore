@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environments
+.env
+.venv/
+venv/
+ENV/
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+
+# Results and Outputs
+results/
+reports/
+screenshots/
+*.log
+*.tmp
+*.bak
+
+# FFUF raw command scripts
+results/raw/
+
+# Reports
+results/html/
+
+# Cache or temp
+*.cache
+*.temp
+
+# Skipped endpoints file
+skipped_endpoints.txt
+
+# System
+Thumbs.db
+Desktop.ini
+
+# Logs
+*.log
+nohup.out

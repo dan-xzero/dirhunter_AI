@@ -1,0 +1,9 @@
+/.env
+/__pycache__
+/db
+/dirsearch.txt
+/logs
+/misclassified_tags.txt
+/results
+/skipped_domains.txt
+/skipped_endpoints.txt
