@@ -1,3 +1,41 @@
+# Python
+__pycache__/
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+
+# Environments
+.env
+venv/
+ENV/
+
+# Logs
+*.log
+logs/
+
+# Databases / State
+.db/
+*.sqlite3
+*.db
+
+# Results
+results/
+
+# Reports
+*.html
+*.csv
+*.json
+
+# Editor/IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
 /.env
 /__pycache__
 /db

@@ -1,18 +1,19 @@
-# File: dirhunter_ai/utils/filters.py (with DB hash check)
+# File: dirhunter_ai/utils/filters.py
 
 import subprocess, os, hashlib, datetime
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from utils.db_handler import init_db, get_stored_hash, update_hash_record
 
+# ─────────── CONFIG ───────────
 SOFT_404_PHRASES = [
     "oops, you must be lost", "page not found", "go to homepage",
     "404 error", "not exist", "return to homepage"
 ]
-EXCLUDE_PATTERNS = ["/api/", "/healthz", "/status"]
+EXCLUDE_PATTERNS = ["/healthz", "/status"]
 DOMAIN_OVERRIDES = {}
 
-# ─────────── dynamic log filenames ───────────
+# ─────────── LOGGING SETUP ───────────
 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -23,7 +24,7 @@ SUMMARY_FILE = os.path.join(LOG_DIR, f"summary_{timestamp}.txt")
 curl_cache = {}  # url → (is_soft404, hash)
 init_db()
 
-# ─────────── log helpers ───────────
+# ─────────── LOG HELPERS ───────────
 def log_skipped_endpoint(url: str, reason: str = "unknown"):
     entry = f"[{reason}] {url}"
     with open(SKIPPED_FILE, "a") as f:
@@ -41,7 +42,7 @@ def log_summary(domain, raw_count, after_heuristic, after_cluster):
         f.write(f"After cluster (new/changed only): {after_cluster}\n")
         f.write("\n")
 
-# ─────────── curl fetcher ───────────
+# ─────────── CURL FETCHER ───────────
 def curl_fetch_hash(url):
     if url in curl_cache:
         return curl_cache[url]
@@ -56,7 +57,7 @@ def curl_fetch_hash(url):
         curl_cache[url] = (False, None)
     return curl_cache[url]
 
-# ─────────── parallel curl runner ───────────
+# ─────────── PARALLEL CURL RUNNER ───────────
 def parallel_curl_fetch(urls, max_workers=10):
     results = {}
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -70,10 +71,11 @@ def parallel_curl_fetch(urls, max_workers=10):
                 results[url] = (False, None)
     return results
 
-# ─────────── main filter ───────────
-def filter_false_positives(domain, results):
+# ─────────── MAIN FILTER ───────────
+def filter_false_positives(domain, results, ignore_hash=False):
     print(f"[~] Filtering for {domain} – raw: {len(results)}")
 
+    # Step 1: heuristic filtering (length + pattern)
     freq = {}
     for r in results:
         freq[r["length"]] = freq.get(r["length"], 0) + 1
@@ -101,6 +103,7 @@ def filter_false_positives(domain, results):
 
     print(f"[~] After heuristic pass: {len(stage1)} kept / {len(results)-len(stage1)} skipped")
 
+    # Step 2: curl + hash + cluster
     urls_to_check = [r["url"] for r in stage1]
     curl_results = parallel_curl_fetch(urls_to_check, max_workers=10)
 
@@ -120,13 +123,17 @@ def filter_false_positives(domain, results):
             print(f"[~] Cluster {key} soft-404 → {len(items)} skipped")
         else:
             for itm in items:
-                stored_hash = get_stored_hash(itm["url"])
-                if stored_hash == itm["body_hash"]:
-                    log_skipped_endpoint(itm["url"], reason="hash-unchanged")
-                else:
+                if ignore_hash:
                     final.append(itm)
                     log_kept_endpoint(itm["url"])
-                    update_hash_record(itm["url"], itm["body_hash"])
+                else:
+                    stored_hash = get_stored_hash(itm["url"])
+                    if stored_hash == itm["body_hash"]:
+                        log_skipped_endpoint(itm["url"], reason="hash-unchanged")
+                    else:
+                        final.append(itm)
+                        log_kept_endpoint(itm["url"])
+                        update_hash_record(itm["url"], itm["body_hash"])
 
     print(f"[+] Final count for {domain}: {len(final)} (new/changed, kept list in {KEPT_FILE})")
     log_summary(domain, raw_count=len(results), after_heuristic=len(stage1), after_cluster=len(final))
