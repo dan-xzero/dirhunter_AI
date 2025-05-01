@@ -1,38 +1,34 @@
-# File: dirhunter_ai/utils/slack_alert.py
-
 import requests
+import os
+from dotenv import load_dotenv
 
-# Make this configurable later
-REPORT_BASE_URL = "https://reports.example.com"
+load_dotenv(override=True)
+REPORT_BASE_URL = os.getenv("REPORT_BASE_URL")
 
 def send_slack_alert(domain, findings, webhook_url):
     """
-    Sends one grouped Slack message for all new/changed high-signal findings on a domain.
+    Always sends a Slack message with total + report link, even if no high-signal findings.
     """
-    if not findings:
-        return
+    total = len(findings)
+    high_signal_count = sum(1 for f in findings if f["ai_tag"] not in ["Other", "Unknown"])
 
-    title = f"🚨 New/Updated Findings on {domain}"
-    color = "#36a64f"  # Green for new/changed
+    report_link = f"{REPORT_BASE_URL}/reports/{domain}_tags.html"
+    title = f"🗂 Scan Results for {domain}"
+    color = "#439FE0"  # Blue
 
-    fields = []
-    for f in findings:
-        fields.append({
-            "title": f"{f['ai_tag']} ({f['status']})",
-            "value": f"<{f['url']}|{f['url']}>",
-            "short": False
-        })
-
-    report_link = f"{REPORT_BASE_URL}/{domain}.html"
+    summary = (
+        f"*Total findings:* {total}\n"
+        f"*High-signal findings:* {high_signal_count}\n"
+        f"📊 <{report_link}|View full report>"
+    )
 
     payload = {
         "attachments": [
             {
-                "fallback": f"New findings on {domain}",
+                "fallback": f"Report ready for {domain}",
                 "color": color,
                 "title": title,
-                "fields": fields,
-                "footer": f"📊 <{report_link}|View full report>",
+                "text": summary,
             }
         ]
     }
@@ -42,6 +38,6 @@ def send_slack_alert(domain, findings, webhook_url):
         if response.status_code != 200:
             print(f"[!] Slack alert failed: {response.text}")
         else:
-            print(f"[+] Slack alert sent for {domain} with {len(findings)} findings")
+            print(f"[+] Slack alert sent for {domain}")
     except Exception as e:
         print(f"[!] Slack alert error: {e}")

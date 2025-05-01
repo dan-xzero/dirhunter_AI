@@ -16,7 +16,7 @@ def run_ffuf(domain,
 
     domain = domain.strip().rstrip("/")
     if not domain.startswith(("http://", "https://")):
-        domain = f"https://{domain}"
+        domain = f"http://{domain}"
 
     url           = f"{domain}/FUZZ"
     output_file   = tempfile.NamedTemporaryFile(delete=False, suffix=".json").name

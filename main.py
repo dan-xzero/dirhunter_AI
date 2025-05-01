@@ -1,4 +1,5 @@
 import os, sys, traceback, logging, argparse
+from dotenv import load_dotenv
 from utils.scanner import run_ffuf
 from utils.filters import filter_false_positives
 from utils.screenshot import take_screenshots_parallel
@@ -8,7 +9,6 @@ from utils.reporter import export_tag_based_reports
 from utils.db_handler import reset_db
 from utils.tag_validator import validate_tagged_entry
 from config import WORDLIST, EXTENSIONS, THREADS, SCREENSHOT_DIR, RAW_RESULTS_DIR
-from dotenv  import load_dotenv
 
 load_dotenv(override=True)
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
@@ -30,13 +30,16 @@ def parse_args():
     parser.add_argument("--ignore-hash", action="store_true", help="Ignore stored hash DB")
     parser.add_argument("--reset-db", action="store_true", help="Reset the hash database")
     parser.add_argument("--screenshot-workers", type=int, default=5, help="Number of parallel screenshot workers (default: 5)")
-    parser.add_argument("--domains", type=str, default="domain.txt", help="Path to domain list file")
+    parser.add_argument("--domains", type=str, default="domain.txt", help="Path to domain list file or a single domain")
     return parser.parse_args()
 
 # ─────────── HELPERS ───────────
-def load_domains(file_path):
-    with open(file_path) as f:
-        return [d.strip() for d in f if d.strip()]
+def load_domains(file_or_value):
+    if os.path.isfile(file_or_value):
+        with open(file_or_value) as f:
+            return [d.strip() for d in f if d.strip()]
+    else:
+        return [file_or_value.strip()]
 
 def log_skipped(domain, skipped_file="skipped_domains.txt"):
     if not os.path.exists(skipped_file):
@@ -57,13 +60,6 @@ def safe_filename(path_frag):
     for ch in r"\\/:*?\"<>|":
         path_frag = path_frag.replace(ch, "_")
     return path_frag.strip("_") or "root"
-
-# ─────────── CONSTANTS ───────────
-HIGH_SIGNAL_TAGS = {
-    "Credentials/Secrets", "Database", "Backup", "Logs/Debug",
-    "Config/Environment", "Source Code", "Admin Panel", "Login Panel",
-    "Payment Info", "PII/User Data", "Internal/Restricted"
-}
 
 # ─────────── MAIN WORKFLOW ───────────
 def process_target(domain, ignore_hash, screenshot_workers):
@@ -93,27 +89,17 @@ def process_target(domain, ignore_hash, screenshot_workers):
 
         take_screenshots_parallel(screenshot_tasks, max_workers=screenshot_workers)
 
-        high_signal = []
         for entry in filtered:
             if os.path.exists(entry["screenshot"]):
                 entry["ai_tag"] = classify_screenshot_with_gpt(entry["screenshot"])
             else:
                 entry["ai_tag"] = "Unknown"
 
-            # Validate tag; if invalid, assign to 'Other'
             if not validate_tagged_entry(entry):
                 entry["ai_tag"] = "Other"
 
-            if entry["ai_tag"] in HIGH_SIGNAL_TAGS:
-                high_signal.append(entry)
-
-        logger.info(f"High-signal findings: {len(high_signal)}")
-
-        # 👉 Send one Slack alert per domain
-        if high_signal:
-            send_slack_alert(domain, high_signal, WEBHOOK_URL)
-
         export_tag_based_reports(domain, filtered)
+        send_slack_alert(domain, filtered, WEBHOOK_URL)
         logger.info(f"Finished domain: {domain}")
         return True
 
