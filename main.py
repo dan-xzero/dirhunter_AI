@@ -7,7 +7,11 @@ from utils.slack_alert import send_slack_alert
 from utils.reporter import export_tag_based_reports
 from utils.db_handler import reset_db
 from utils.tag_validator import validate_tagged_entry
-from config import WORDLIST, EXTENSIONS, THREADS, WEBHOOK_URL, SCREENSHOT_DIR, RAW_RESULTS_DIR
+from config import WORDLIST, EXTENSIONS, THREADS, SCREENSHOT_DIR, RAW_RESULTS_DIR
+from dotenv  import load_dotenv
+
+load_dotenv(override=True)
+WEBHOOK_URL = os.getenv.load("WEBHOOK_URL")
 
 # ─────────── LOGGING SETUP ───────────
 logging.basicConfig(
