@@ -5,7 +5,7 @@ import base64
 from openai import OpenAI
 from PIL import Image
 
-client = OpenAI()
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 def classify_screenshot_with_gpt(screenshot_path):
     """
