@@ -1,22 +1,32 @@
 # File: dirhunter_ai/utils/scanner.py
-import subprocess, json, tempfile, os, shlex
+import subprocess, json, tempfile, os, shlex, requests
+
+def smart_resolve_scheme(domain):
+    if domain.startswith("http://") or domain.startswith("https://"):
+        return domain.rstrip("/")
+
+    https_url = f"https://{domain}"
+    try:
+        resp = requests.head(https_url, timeout=5, allow_redirects=True)
+        if resp.status_code < 500:
+            print(f"[+] Using HTTPS → {https_url}")
+            return https_url
+    except Exception:
+        print(f"[!] HTTPS failed, falling back to HTTP")
+
+    http_url = f"http://{domain}"
+    print(f"[+] Using HTTP → {http_url}")
+    return http_url.rstrip("/")
+
 
 def run_ffuf(domain,
              wordlist,
              extensions,
              threads,
-             rate      = 50,   # max requests‑per‑second   (None → no limit)
-             delay     = None  # e.g. "0.1"  or  "0.2‑1.0"  (string accepted by ‑p)
+             rate      = 50,
+             delay     = None
              ):
-    """
-    :param rate:  int | None   –  FFUF ‑rate  (reqs/sec).  0 or None disables.
-    :param delay: str | None   –  FFUF ‑p     fixed or random delay between requests
-                                   Examples:  "0.1"   or  "0.2-1.0"
-    """
-
-    domain = domain.strip().rstrip("/")
-    if not domain.startswith(("http://", "https://")):
-        domain = f"http://{domain}"
+    domain = smart_resolve_scheme(domain)
 
     url           = f"{domain}/FUZZ"
     output_file   = tempfile.NamedTemporaryFile(delete=False, suffix=".json").name
@@ -30,16 +40,12 @@ def run_ffuf(domain,
         "-t",  str(threads),
         "-o",  output_file,
         "-of", "json",
-
-        # "-r",                 # follow redirects
-        # "-ac",                # auto‑calibration
-        "-fc", "404,429",     # filter noise
+        "-fc", "404,429",
         "-v",
         # "-x", "http://127.0.0.1:8080",
-        "-H", "User-agent:  Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36-FUZZ"
+        "-H", "User-agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36-FUZZ"
     ]
 
-    # apply rate limit / delay if given
     if rate and int(rate) > 0:
         cmd += ["-rate", str(rate)]
     if delay:
