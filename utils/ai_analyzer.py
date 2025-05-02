@@ -4,8 +4,14 @@ import os
 import base64
 from openai import OpenAI
 from PIL import Image
+from dotenv import load_dotenv
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+load_dotenv(override=True)
+api_key = os.getenv("OPENAI_API_KEY")
+if not api_key:
+    raise ValueError("OPENAI_API_KEY not found in environment!")
+
+client = OpenAI(api_key=api_key)
 
 def classify_screenshot_with_gpt(screenshot_path):
     """
