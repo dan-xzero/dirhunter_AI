@@ -33,12 +33,20 @@ HELP_MESSAGE = (
 )
 
 # ─────────── scan runner ───────────
+
+def get_wordlist_type(domain):
+    with open("domains/prod_domains.txt") as f:
+        prod_domains = {d.strip() for d in f if d.strip()}
+    return "prod" if domain in prod_domains else "nonprod"
+
 def run_scan_async(domain, args, response_url, base_url):
-    cmd = f"{SCAN_SCRIPT} --domains {domain} {args}"
+    domain_type = get_wordlist_type(domain)
+    wordlist_arg = f"--wordlist wordlists/wordlist_{domain_type}.txt"
+
+    cmd = f"{SCAN_SCRIPT} --domains {domain} {wordlist_arg} {args}"
     print(f"[~] Launching scan: {cmd}")
     subprocess.call(cmd, shell=True)
 
-    # After scan completes, send follow-up Slack message
     report_url = f"{base_url}/reports/{domain}_tags.html"
     followup_message = {
         "response_type": "in_channel",

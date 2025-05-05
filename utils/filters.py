@@ -1,6 +1,6 @@
 # File: dirhunter_ai/utils/filters.py
 
-import subprocess, os, hashlib, datetime
+import subprocess, os, hashlib, datetime, ssdeep
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from utils.db_handler import init_db, get_stored_hash, update_hash_record
@@ -21,7 +21,7 @@ SKIPPED_FILE = os.path.join(LOG_DIR, f"skipped_{timestamp}.txt")
 KEPT_FILE = os.path.join(LOG_DIR, f"kept_{timestamp}.txt")
 SUMMARY_FILE = os.path.join(LOG_DIR, f"summary_{timestamp}.txt")
 
-curl_cache = {}  # url → (is_soft404, hash)
+curl_cache = {}  # url → (is_soft404, sha1_hash, fuzzy_hash)
 init_db()
 
 # ─────────── LOG HELPERS ───────────
@@ -39,8 +39,7 @@ def log_summary(domain, raw_count, after_heuristic, after_cluster):
         f.write(f"Domain: {domain}\n")
         f.write(f"Raw results: {raw_count}\n")
         f.write(f"After heuristic: {after_heuristic}\n")
-        f.write(f"After cluster (new/changed only): {after_cluster}\n")
-        f.write("\n")
+        f.write(f"After cluster (new/changed only): {after_cluster}\n\n")
 
 # ─────────── CURL FETCHER ───────────
 def curl_fetch_hash(url):
@@ -51,10 +50,11 @@ def curl_fetch_hash(url):
                            capture_output=True, text=True)
         body = r.stdout.lower()
         is_soft = any(p in body for p in SOFT_404_PHRASES)
-        body_hash = hashlib.sha1(body.encode("utf-8")).hexdigest()
-        curl_cache[url] = (is_soft, body_hash)
+        sha1_hash = hashlib.sha1(body.encode("utf-8")).hexdigest()
+        fuzzy_hash = ssdeep.hash(body)
+        curl_cache[url] = (is_soft, sha1_hash, fuzzy_hash)
     except Exception:
-        curl_cache[url] = (False, None)
+        curl_cache[url] = (False, None, None)
     return curl_cache[url]
 
 # ─────────── PARALLEL CURL RUNNER ───────────
@@ -68,7 +68,7 @@ def parallel_curl_fetch(urls, max_workers=10):
                 result = future.result()
                 results[url] = result
             except Exception:
-                results[url] = (False, None)
+                results[url] = (False, None, None)
     return results
 
 # ─────────── MAIN FILTER ───────────
@@ -109,20 +109,31 @@ def filter_false_positives(domain, results, ignore_hash=False):
 
     clusters = defaultdict(list)
     for r in stage1:
-        is_soft, body_hash = curl_results.get(r["url"], (False, None))
+        is_soft, body_hash, fuzzy_hash = curl_results.get(r["url"], (False, None, None))
         r["body_hash"] = body_hash
+        r["fuzzy_hash"] = fuzzy_hash
         clusters[(r["status"], r["length"], body_hash)].append(r)
 
     final = []
+    seen_fuzzy = []
+
     for key, items in clusters.items():
         probe = items[0]
-        is_soft, _ = curl_results.get(probe["url"], (False, None))
+        is_soft, _, _ = curl_results.get(probe["url"], (False, None, None))
+
         if is_soft:
             for itm in items:
                 log_skipped_endpoint(itm["url"], reason="curl-soft404")
             print(f"[~] Cluster {key} soft-404 → {len(items)} skipped")
         else:
             for itm in items:
+                # Fuzzy duplicate check
+                if any(ssdeep.compare(itm["fuzzy_hash"], seen) > 90 for seen in seen_fuzzy):
+                    log_skipped_endpoint(itm["url"], reason="fuzzy-dupe")
+                    continue
+                seen_fuzzy.append(itm["fuzzy_hash"])
+
+                # Final storage/hash comparison
                 if ignore_hash:
                     final.append(itm)
                     log_kept_endpoint(itm["url"])

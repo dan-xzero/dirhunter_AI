@@ -8,12 +8,12 @@ from utils.slack_alert import send_slack_alert
 from utils.reporter import export_tag_based_reports
 from utils.db_handler import reset_db
 from utils.tag_validator import validate_tagged_entry
-from config import WORDLIST, EXTENSIONS, THREADS, SCREENSHOT_DIR, RAW_RESULTS_DIR
+from config import EXTENSIONS, THREADS, SCREENSHOT_DIR, RAW_RESULTS_DIR
 
 load_dotenv(override=True)
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
-# ─────────── LOGGING SETUP ───────────
+# ──────────── LOGGING SETUP ────────────
 logging.basicConfig(
     level=logging.INFO,
     format='[%(asctime)s] %(levelname)s: %(message)s',
@@ -24,22 +24,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ─────────── CLI ARGUMENTS ───────────
+# ──────────── CLI ARGUMENTS ────────────
 def parse_args():
     parser = argparse.ArgumentParser(description="DirHunter AI - Advanced Fuzzing Pipeline")
+    parser.add_argument("--domains", type=str, help="Comma-separated domains or path to a domains file")
+    parser.add_argument("--wordlist", type=str, help="Path to wordlist file")
     parser.add_argument("--ignore-hash", action="store_true", help="Ignore stored hash DB")
     parser.add_argument("--reset-db", action="store_true", help="Reset the hash database")
     parser.add_argument("--screenshot-workers", type=int, default=5, help="Number of parallel screenshot workers (default: 5)")
-    parser.add_argument("--domains", type=str, default="domain.txt", help="Path to domain list file or a single domain")
     return parser.parse_args()
 
-# ─────────── HELPERS ───────────
-def load_domains(file_or_value):
-    if os.path.isfile(file_or_value):
-        with open(file_or_value) as f:
-            return [d.strip() for d in f if d.strip()]
-    else:
-        return [file_or_value.strip()]
+# ──────────── HELPERS ────────────
+def load_domains(file_path):
+    if os.path.exists(file_path):
+        with open(file_path) as f:
+            return [line.strip() for line in f if line.strip() and not line.startswith("#")]
+    return []
 
 def log_skipped(domain, skipped_file="skipped_domains.txt"):
     if not os.path.exists(skipped_file):
@@ -61,14 +61,13 @@ def safe_filename(path_frag):
         path_frag = path_frag.replace(ch, "_")
     return path_frag.strip("_") or "root"
 
-# ─────────── MAIN WORKFLOW ───────────
-def process_target(domain, ignore_hash, screenshot_workers):
+def process_target(domain, wordlist, ignore_hash, screenshot_workers):
     try:
-        logger.info(f"Scanning: {domain}")
+        logger.info(f"Scanning: {domain} with wordlist {wordlist}")
         os.makedirs(f"{RAW_RESULTS_DIR}/{domain}", exist_ok=True)
         os.makedirs(f"{SCREENSHOT_DIR}/{domain}", exist_ok=True)
 
-        raw = run_ffuf(domain, WORDLIST, EXTENSIONS, threads=THREADS, rate=30, delay="0.2-1.0")
+        raw = run_ffuf(domain, wordlist, EXTENSIONS, threads=THREADS, rate=30, delay="0.2-1.0")
         if not raw:
             logger.warning(f"No results from FFUF → skipping {domain}")
             log_skipped(domain)
@@ -99,7 +98,12 @@ def process_target(domain, ignore_hash, screenshot_workers):
                 entry["ai_tag"] = "Other"
 
         export_tag_based_reports(domain, filtered)
-        send_slack_alert(domain, filtered, WEBHOOK_URL)
+
+        if WEBHOOK_URL and WEBHOOK_URL.lower() != "none":
+            send_slack_alert(domain, filtered, WEBHOOK_URL)
+        else:
+            logger.warning("WEBHOOK_URL not set. Skipping Slack alert.")
+
         logger.info(f"Finished domain: {domain}")
         return True
 
@@ -109,7 +113,7 @@ def process_target(domain, ignore_hash, screenshot_workers):
         log_skipped(domain)
         return False
 
-# ─────────── MAIN ENTRY ───────────
+# ──────────── MAIN ENTRY ────────────
 def main():
     args = parse_args()
 
@@ -118,9 +122,28 @@ def main():
         logger.info("Hash database reset.")
         sys.exit(0)
 
-    domains = load_domains(args.domains)
-    for domain in domains:
-        process_target(domain, ignore_hash=args.ignore_hash, screenshot_workers=args.screenshot_workers)
+    # Load from CLI if given
+    if args.domains:
+        if os.path.isfile(args.domains):
+            domains = load_domains(args.domains)
+        else:
+            domains = [d.strip() for d in args.domains.split(",") if d.strip()]
+        if not args.wordlist:
+            logger.error("When using --domains, you must also provide --wordlist.")
+            sys.exit(1)
+        wordlist = args.wordlist
+        for domain in domains:
+            process_target(domain, wordlist=wordlist, ignore_hash=args.ignore_hash, screenshot_workers=args.screenshot_workers)
+    else:
+        # Default prod/nonprod mode
+        prod_domains = load_domains("domains/prod_domains.txt")
+        nonprod_domains = load_domains("domains/nonprod_domains.txt")
+
+        for domain in prod_domains:
+            process_target(domain, wordlist="wordlists/wordlist_prod.txt", ignore_hash=args.ignore_hash, screenshot_workers=args.screenshot_workers)
+
+        for domain in nonprod_domains:
+            process_target(domain, wordlist="wordlists/wordlist_nonprod.txt", ignore_hash=args.ignore_hash, screenshot_workers=args.screenshot_workers)
 
 if __name__ == "__main__":
     main()
