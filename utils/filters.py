@@ -3,7 +3,7 @@
 import subprocess, os, hashlib, datetime, ssdeep
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from utils.db_handler import init_db, get_stored_hash, update_hash_record
+from utils.db_handler import init_db, get_stored_hash, update_hash_record, track_finding, get_finding_status
 
 # ─────────── CONFIG ───────────
 SOFT_404_PHRASES = [
@@ -34,12 +34,15 @@ def log_kept_endpoint(url: str):
     with open(KEPT_FILE, "a") as f:
         f.write(url + "\n")
 
-def log_summary(domain, raw_count, after_heuristic, after_cluster):
+def log_summary(domain, raw_count, after_heuristic, after_cluster, new_count, changed_count, existing_count):
     with open(SUMMARY_FILE, "a") as f:
         f.write(f"Domain: {domain}\n")
         f.write(f"Raw results: {raw_count}\n")
         f.write(f"After heuristic: {after_heuristic}\n")
-        f.write(f"After cluster (new/changed only): {after_cluster}\n\n")
+        f.write(f"After cluster: {after_cluster}\n")
+        f.write(f"  - New findings: {new_count}\n")
+        f.write(f"  - Changed findings: {changed_count}\n")
+        f.write(f"  - Existing findings: {existing_count}\n\n")
 
 # ─────────── CURL FETCHER ───────────
 def curl_fetch_hash(url):
@@ -79,7 +82,7 @@ def filter_false_positives(domain, results, ignore_hash=False):
     freq = {}
     for r in results:
         freq[r["length"]] = freq.get(r["length"], 0) + 1
-    common_len = max(freq, key=freq.get) if freq else None
+    common_len = max(freq.keys(), key=lambda k: freq[k]) if freq else None
 
     base_kw = {"admin", "login", "dashboard", "config", "debug", "upload", "backup"}
     kw_set = base_kw | set(DOMAIN_OVERRIDES.get(domain.lower(), {}).get("keywords", []))
@@ -112,10 +115,16 @@ def filter_false_positives(domain, results, ignore_hash=False):
         is_soft, body_hash, fuzzy_hash = curl_results.get(r["url"], (False, None, None))
         r["body_hash"] = body_hash
         r["fuzzy_hash"] = fuzzy_hash
+        r["sha1_hash"] = body_hash  # Add for compatibility
         clusters[(r["status"], r["length"], body_hash)].append(r)
 
     final = []
     seen_fuzzy = []
+    
+    # Track counts by status
+    new_count = 0
+    changed_count = 0
+    existing_count = 0
 
     for key, items in clusters.items():
         probe = items[0]
@@ -133,19 +142,31 @@ def filter_false_positives(domain, results, ignore_hash=False):
                     continue
                 seen_fuzzy.append(itm["fuzzy_hash"])
 
-                # Final storage/hash comparison
-                if ignore_hash:
-                    final.append(itm)
-                    log_kept_endpoint(itm["url"])
+                # Track finding in database first
+                itm["domain"] = domain
+                track_finding(itm)
+                
+                # Get finding status AFTER tracking (pass hash for exact match)
+                finding_status = get_finding_status(itm["url"], itm["sha1_hash"])
+                itm["finding_status"] = finding_status['status']
+                itm["times_seen"] = finding_status['times_seen']
+                itm["first_seen"] = finding_status.get('first_seen')
+                
+                # Count by status
+                if finding_status['status'] == 'new':
+                    new_count += 1
+                elif finding_status['status'] == 'changed':
+                    changed_count += 1
                 else:
-                    stored_hash = get_stored_hash(itm["url"])
-                    if stored_hash == itm["body_hash"]:
-                        log_skipped_endpoint(itm["url"], reason="hash-unchanged")
-                    else:
-                        final.append(itm)
-                        log_kept_endpoint(itm["url"])
-                        update_hash_record(itm["url"], itm["body_hash"])
+                    existing_count += 1
 
-    print(f"[+] Final count for {domain}: {len(final)} (new/changed, kept list in {KEPT_FILE})")
-    log_summary(domain, raw_count=len(results), after_heuristic=len(stage1), after_cluster=len(final))
+                # Include all findings, even existing/unchanged ones, so they appear in reports
+                final.append(itm)
+                log_kept_endpoint(itm["url"])
+                update_hash_record(itm["url"], itm["body_hash"])
+
+    print(f"[+] Final count for {domain}: {len(final)} (new: {new_count}, changed: {changed_count}, existing: {existing_count})")
+    log_summary(domain, raw_count=len(results), after_heuristic=len(stage1), 
+                after_cluster=len(final), new_count=new_count, 
+                changed_count=changed_count, existing_count=existing_count)
     return final

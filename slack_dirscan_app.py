@@ -14,7 +14,7 @@ SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 SCAN_SCRIPT = "python main.py"
 REPORTS_DIR = "results/html"
-SCREENSJOT_DIR = "results/screenshots"
+SCREENSHOT_DIR = "results/screenshots"
 NGROK_URL = os.getenv("NGROK_URL", "http://localhost:5000")
 
 app = Flask(__name__)
@@ -22,42 +22,105 @@ app = Flask(__name__)
 HELP_MESSAGE = (
     "📘 *DirHunter AI Slash Command Help*\n\n"
     "*Usage:*\n"
-    "`/dirscan <domain> [options]`\n\n"
+    "`/dirscan <domain(s)> [options]`\n\n"
     "*Examples:*\n"
-    "`/dirscan example.com --ignore-hash --screenshot-workers 10`\n\n"
+    "`/dirscan example.com`\n"
+    "`/dirscan example.com,test.com --ignore-hash`\n"
+    "`/dirscan all` - Scan all configured domains\n"
+    "`/dirscan prod` - Scan production domains only\n"
+    "`/dirscan nonprod` - Scan non-production domains only\n\n"
     "*Available options:*\n"
-    "`--ignore-hash` → Ignore stored hash DB\n"
-    "`--reset-db` → Reset the hash database\n"
-    "`--screenshot-workers N` → Number of parallel screenshot workers (default: 5)`\n\n"
-    "This command triggers a full fuzzing scan on the specified domain and will report results back here when complete."
+    "`--ignore-hash` → Show all findings including existing ones\n"
+    "`--screenshot-workers N` → Number of parallel screenshot workers (default: 5)\n"
+    "`--retry-rate-limits` → Retry previously rate-limited paths\n\n"
+    "*Reports:*\n"
+    f"Dashboard: `{NGROK_URL}/reports/dashboard.html`\n\n"
+    "This command triggers a full fuzzing scan and will report results back here when complete."
 )
 
 # ─────────── scan runner ───────────
 
-def get_wordlist_type(domain):
-    with open("domains/prod_domains.txt") as f:
-        prod_domains = {d.strip() for d in f if d.strip()}
-    return "prod" if domain in prod_domains else "nonprod"
+def get_wordlist_for_domain(domain):
+    """Determine which wordlist to use based on domain configuration"""
+    try:
+        with open("domains/prod_domains.txt") as f:
+            prod_domains = {d.strip() for d in f if d.strip()}
+        return "wordlists/wordlist_prod.txt" if domain in prod_domains else "wordlists/wordlist_nonprod.txt"
+    except:
+        return "wordlists/wordlist_nonprod.txt"
 
-def run_scan_async(domain, args, response_url, base_url):
-    domain_type = get_wordlist_type(domain)
-    wordlist_arg = f"--wordlist wordlists/wordlist_{domain_type}.txt"
+def run_scan_async(domains, args, response_url, base_url):
+    """Run scan for multiple domains and send consolidated results"""
+    
+    # Build command based on domain specification
+    if domains.lower() == "all":
+        # Scan all configured domains
+        cmd = f"{SCAN_SCRIPT} {args}"
+    elif domains.lower() == "prod":
+        # Scan production domains only
+        with open("domains/prod_domains.txt") as f:
+            prod_list = [d.strip() for d in f if d.strip()]
+        if not prod_list:
+            requests.post(response_url, json={"response_type": "ephemeral", "text": "❌ No production domains configured."})
+            return
+        cmd = f"{SCAN_SCRIPT} --domains {','.join(prod_list)} --wordlist wordlists/wordlist_prod.txt {args}"
+    elif domains.lower() == "nonprod":
+        # Scan non-production domains only
+        with open("domains/nonprod_domains.txt") as f:
+            nonprod_list = [d.strip() for d in f if d.strip()]
+        if not nonprod_list:
+            requests.post(response_url, json={"response_type": "ephemeral", "text": "❌ No non-production domains configured."})
+            return
+        cmd = f"{SCAN_SCRIPT} --domains {','.join(nonprod_list)} --wordlist wordlists/wordlist_nonprod.txt {args}"
+    else:
+        # Specific domains provided
+        domain_list = [d.strip() for d in domains.split(",")]
+        
+        # Group domains by wordlist type
+        prod_domains = []
+        nonprod_domains = []
+        
+        for domain in domain_list:
+            wordlist = get_wordlist_for_domain(domain)
+            if "prod" in wordlist:
+                prod_domains.append(domain)
+            else:
+                nonprod_domains.append(domain)
+        
+        # For mixed domain types, we need to determine the best approach
+        if prod_domains and nonprod_domains:
+            # Use nonprod wordlist for all (more comprehensive)
+            cmd = f"{SCAN_SCRIPT} --domains {domains} --wordlist wordlists/wordlist_nonprod.txt {args}"
+        elif prod_domains:
+            cmd = f"{SCAN_SCRIPT} --domains {domains} --wordlist wordlists/wordlist_prod.txt {args}"
+        else:
+            cmd = f"{SCAN_SCRIPT} --domains {domains} --wordlist wordlists/wordlist_nonprod.txt {args}"
 
-    cmd = f"{SCAN_SCRIPT} --domains {domain} {wordlist_arg} {args}"
     print(f"[~] Launching scan: {cmd}")
-    subprocess.call(cmd, shell=True)
-
-    report_url = f"{base_url}/reports/{domain}_tags.html"
-    followup_message = {
-        "response_type": "in_channel",
-        "text": f"✅ Scan complete for *{domain}*! View the full report: {report_url}"
-    }
+    
+    # Run the scan
+    result = subprocess.call(cmd, shell=True)
+    
+    # Prepare follow-up message
+    dashboard_url = f"{base_url}/reports/dashboard.html"
+    
+    if result == 0:
+        followup_message = {
+            "response_type": "in_channel",
+            "text": f"✅ Scan complete! View the comprehensive dashboard: {dashboard_url}\n\nThe consolidated results have been posted to the main channel."
+        }
+    else:
+        followup_message = {
+            "response_type": "in_channel",
+            "text": f"⚠️ Scan completed with warnings. Check the dashboard for details: {dashboard_url}"
+        }
+    
     try:
         resp = requests.post(response_url, json=followup_message)
         if resp.status_code != 200:
             print(f"[!] Failed to send follow-up Slack message: {resp.text}")
         else:
-            print(f"[+] Follow-up Slack message sent for {domain}")
+            print(f"[+] Follow-up Slack message sent")
     except Exception as e:
         print(f"[!] Error sending follow-up Slack message: {e}")
 
@@ -66,20 +129,38 @@ def run_scan_async(domain, args, response_url, base_url):
 def slack_dirscan():
     text = request.form.get("text", "").strip()
     response_url = request.form.get("response_url")
+    user_name = request.form.get("user_name", "User")
 
-    if text in ["help", "--help"]:
+    if text in ["help", "--help", ""]:
         return jsonify({"response_type": "ephemeral", "text": HELP_MESSAGE})
 
     parts = text.split()
     if not parts:
-        return jsonify({"response_type": "ephemeral", "text": "❌ Please provide a domain."})
+        return jsonify({"response_type": "ephemeral", "text": "❌ Please provide domain(s) to scan or use 'all', 'prod', or 'nonprod'."})
 
-    domain = parts[0]
+    domains = parts[0]
     extra_args = " ".join(parts[1:])
 
-    threading.Thread(target=run_scan_async, args=(domain, extra_args, response_url, NGROK_URL)).start()
+    # Start scan in background thread
+    threading.Thread(target=run_scan_async, args=(domains, extra_args, response_url, NGROK_URL)).start()
 
-    return jsonify({"response_type": "in_channel", "text": f"✅ Fuzzing started for *{domain}*! Results will be posted here when ready."})
+    # Determine what's being scanned for the immediate response
+    if domains.lower() == "all":
+        scan_target = "all configured domains"
+    elif domains.lower() == "prod":
+        scan_target = "production domains"
+    elif domains.lower() == "nonprod":
+        scan_target = "non-production domains"
+    elif "," in domains:
+        domain_count = len(domains.split(","))
+        scan_target = f"{domain_count} domains"
+    else:
+        scan_target = domains
+
+    return jsonify({
+        "response_type": "in_channel", 
+        "text": f"🚀 *{user_name}* started fuzzing scan for *{scan_target}*!\n\nResults will be posted here when ready. This may take several minutes depending on the number of domains and paths."
+    })
 
 # ─────────── Serve Reports ───────────
 @app.route("/reports/<path:filename>", methods=["GET"])
@@ -88,7 +169,30 @@ def serve_report(filename):
 
 @app.route("/screenshots/<path:filename>", methods=["GET"])
 def serve_screenshots(filename):
-    return send_from_directory(SCREENSJOT_DIR, filename)
+    return send_from_directory(SCREENSHOT_DIR, filename)
+
+@app.route("/", methods=["GET"])
+def index():
+    """Simple index page with link to dashboard"""
+    return f"""
+    <html>
+    <head>
+        <title>DirHunter AI</title>
+        <style>
+            body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+                   margin: 40px; text-align: center; }}
+            h1 {{ color: #667eea; }}
+            a {{ color: #6366f1; text-decoration: none; font-size: 1.2em; }}
+            a:hover {{ text-decoration: underline; }}
+        </style>
+    </head>
+    <body>
+        <h1>🔍 DirHunter AI</h1>
+        <p>Advanced Security Scanning Platform</p>
+        <p><a href="/reports/dashboard.html">View Security Dashboard →</a></p>
+    </body>
+    </html>
+    """
 
 # ─────────── Main ───────────
 if __name__ == "__main__":
