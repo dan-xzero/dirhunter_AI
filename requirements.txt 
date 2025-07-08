@@ -4,4 +4,3 @@ python-dotenv==1.0.1
 openai==1.14.3
 selenium==4.20.0
 pillow==10.3.0
-
