@@ -21,7 +21,7 @@ An intelligent AI-powered web security scanning platform that combines directory
 
 ```
 dirhunter_ai/
-├── main.py                 # CLI entry point with consolidated scanning
+├── main_optimized.py       # Optimized CLI entry point with parallel scanning
 ├── slack_dirscan_app.py    # Enhanced Slack app with multi-domain support
 ├── config.py               # Configuration settings
 ├── utils/                 
@@ -112,6 +112,7 @@ Create `.env` file:
 # Slack Integration (optional)
 SLACK_BOT_TOKEN=xoxb-your-bot-token
 WEBHOOK_URL=https://hooks.slack.com/services/your/webhook/url
+SLACK_SIGNING_SECRET=your-signing-secret
 
 # Report URLs
 REPORT_BASE_URL=https://your-ngrok-or-server.com
@@ -135,22 +136,27 @@ Edit domain lists:
 
 ```bash
 # Scan all configured domains
-python main.py
+python main_optimized.py
 
 # Scan specific domains
-python main.py --domains example.com,test.com --wordlist wordlists/wordlist_nonprod.txt
+python main_optimized.py --domains example.com,test.com --wordlist wordlists/wordlist_nonprod.txt
 
 # Show all findings (including existing ones)
-python main.py --ignore-hash
+python main_optimized.py --ignore-hash
 
 # Retry rate-limited paths from previous scans
-python main.py --retry-rate-limits
+python main_optimized.py --retry-rate-limits
 
 # Configure parallel workers
-python main.py --screenshot-workers 10
+python main_optimized.py --screenshot-workers 10
 
 # Reset database (start fresh)
-python main.py --reset-db
+python main_optimized.py --reset-db
+# Parallel domain scanning
+python main_optimized.py --parallel-domains 5 --screenshot-workers 10
+
+# Generate performance report
+python main_optimized.py --performance-report
 ```
 
 ### Slack Integration
@@ -197,6 +203,12 @@ https://your-ngrok-url.ngrok.io/slack/dirscan
 
 # Get help
 /dirscan help
+
+💡  Copy the *Signing Secret* from your Slack app and export it so the Flask app can verify requests:
+
+```bash
+export SLACK_SIGNING_SECRET='<your-signing-secret>'
+```
 ```
 
 ---
@@ -338,7 +350,7 @@ export OPENAI_API_KEY=sk-your-key
 **Rate limiting issues:**
 ```bash
 # Use retry flag
-python main.py --retry-rate-limits
+python main_optimized.py --retry-rate-limits
 ```
 
 ### Logs and Debugging

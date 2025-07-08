@@ -7,12 +7,16 @@ import argparse
 import requests
 from flask import Flask, request, jsonify, send_from_directory
 from dotenv import load_dotenv
+import sys
+import hmac
+import hashlib
+import time
 
 load_dotenv(override=True)
 
 SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-SCAN_SCRIPT = "python main.py"
+SCAN_SCRIPT = f"{sys.executable} main_optimized.py"
 REPORTS_DIR = "results/html"
 SCREENSHOT_DIR = "results/screenshots"
 NGROK_URL = os.getenv("NGROK_URL", "http://localhost:5000")
@@ -48,6 +52,29 @@ def get_wordlist_for_domain(domain):
         return "wordlists/wordlist_prod.txt" if domain in prod_domains else "wordlists/wordlist_nonprod.txt"
     except:
         return "wordlists/wordlist_nonprod.txt"
+
+def verify_slack_request(req):
+    """Validate request using Slack signing secret. Returns True if valid or no secret configured."""
+    if not SLACK_SIGNING_SECRET:
+        return True  # Skip verification if secret not provided
+
+    timestamp = req.headers.get("X-Slack-Request-Timestamp")
+    slack_signature = req.headers.get("X-Slack-Signature")
+
+    if not timestamp or not slack_signature:
+        return False
+
+    # Reject if request is too old (replay attack protection)
+    if abs(time.time() - int(timestamp)) > 60 * 5:
+        return False
+
+    sig_basestring = f"v0:{timestamp}:{req.get_data(as_text=True)}"
+    my_signature = "v0=" + hmac.new(
+        SLACK_SIGNING_SECRET.encode(), sig_basestring.encode(), hashlib.sha256
+    ).hexdigest()
+
+    # Constant-time compare
+    return hmac.compare_digest(my_signature, slack_signature)
 
 def run_scan_async(domains, args, response_url, base_url):
     """Run scan for multiple domains and send consolidated results"""
@@ -127,6 +154,10 @@ def run_scan_async(domains, args, response_url, base_url):
 # ─────────── Slack endpoint ───────────
 @app.route("/slack/dirscan", methods=["POST"])
 def slack_dirscan():
+    # Validate request authenticity
+    if not verify_slack_request(request):
+        return jsonify({"error": "invalid request"}), 400
+
     text = request.form.get("text", "").strip()
     response_url = request.form.get("response_url")
     user_name = request.form.get("user_name", "User")
