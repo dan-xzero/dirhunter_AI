@@ -377,12 +377,7 @@ def create_dashboard(all_domains_data):
                     <tbody>
     """
     
-    # After building per-domain pages, also build compliance reports
-    compliance_links = {}
-    for domain, findings in all_domains_data.items():
-        compliance_path = create_compliance_report(domain, findings)
-        compliance_links[domain] = os.path.relpath(compliance_path, HTML_REPORT_DIR)
-
+    # Compliance-style reports removed – only technical reports remain
     # Add domain rows
     for domain in sorted(all_domains_data.keys()):
         findings = all_domains_data[domain]
@@ -397,7 +392,7 @@ def create_dashboard(all_domains_data):
                             <td>{new_count}</td>
                             <td>{changed_count}</td>
                             <td>{high_priority_count}</td>
-                            <td><a href="{domain}_tags.html">Technical</a> | <a href="{compliance_links[domain]}">Compliance</a></td>
+                            <td><a href="{domain}_tags.html">View</a></td>
                         </tr>
         """
     

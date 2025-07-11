@@ -136,14 +136,22 @@ def process_domain_optimized(domain, wordlist, ignore_hash, screenshot_workers, 
             log_skipped(domain)
             return None, perf_metrics
 
-        # Prepare screenshot tasks
+        # Prepare screenshot tasks – skip direct downloads
         screenshot_tasks = []
         for entry in filtered:
             entry["url"] = force_trailing_slash_if_needed(entry["url"], entry["status"])
+
+            # Direct download? – no screenshot / classification necessary
+            if entry.get("downloadable"):
+                entry["screenshot"] = ""
+                # Tag already set in filter stage but double-check
+                entry.setdefault("ai_tag", "Downloadable File")
+                continue
+
             shot_path = os.path.join(SCREENSHOT_DIR, domain, safe_filename(entry["path"]) + ".png")
             entry["screenshot"] = shot_path
             screenshot_tasks.append({
-                "url": entry["url"], 
+                "url": entry["url"],
                 "output_path": shot_path,
                 "screenshot_path": shot_path
             })
@@ -157,8 +165,8 @@ def process_domain_optimized(domain, wordlist, ignore_hash, screenshot_workers, 
         # Batch classify screenshots
         classification_start = time.time()
         classification_tasks = [
-            {"screenshot_path": entry["screenshot"], "url": entry["url"]} 
-            for entry in filtered if os.path.exists(entry["screenshot"])
+            {"screenshot_path": entry["screenshot"], "url": entry["url"]}
+            for entry in filtered if entry.get("screenshot") and os.path.exists(entry["screenshot"])
         ]
         
         if classification_tasks:

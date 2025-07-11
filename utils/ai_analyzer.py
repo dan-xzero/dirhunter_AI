@@ -20,6 +20,7 @@ CATEGORY_PRIORITY = {
     "Database": 9,
     "Admin Panel": 8,
     "Backup": 8,
+    "Downloadable File": 6,
     "Source Code": 7,
     "Config/Environment": 7,
     "Logs/Debug": 6,
@@ -44,10 +45,11 @@ def classify_screenshot_with_gpt(screenshot_path, url_context=None):
         with open(screenshot_path, "rb") as img:
             base64_image = base64.b64encode(img.read()).decode("utf-8")
 
-        # Enhanced prompt with URL context
+        # Enhanced prompt with URL context removed and explicit instruction to ignore URL
         prompt_text = (
             "You are an expert website security AI helping classify screenshots for vulnerability assessment. "
-            "Analyze the screenshot carefully and classify it into EXACTLY ONE category based on security relevance.\n\n"
+            "Analyse ONLY the visible page content – completely ignore any address-bar/URL text or file name hints. "
+            "Classify the screenshot into EXACTLY ONE category based strictly on what the user would see rendered in the browser.\n\n"
         )
         
         if url_context:
@@ -59,19 +61,19 @@ def classify_screenshot_with_gpt(screenshot_path, url_context=None):
             "2) Database → database interfaces, phpMyAdmin, SQL tools, database dumps\n"
             "3) Admin Panel → administrative dashboards, control panels, management interfaces\n"
             "4) Backup → backup files, archives (.zip, .tar, .gz), old versions, snapshots\n"
-            "5) Source Code → exposed source code, .git directories, version control\n"
-            "6) Config/Environment → configuration files, settings, environment variables\n"
-            "7) Logs/Debug → log files, debug output, stack traces, error details\n"
-            "8) Login Panel → authentication forms, sign-in pages (NOT admin panels)\n"
-            "9) Payment Info → payment forms, credit card fields, billing pages\n"
-            "10) PII/User Data → personal information, user profiles, private data\n"
-            "11) Internal/Restricted → internal tools, staging environments, restricted access\n"
-            "12) API Documentation → Swagger, API docs, endpoint documentation\n"
-            "13) Development/Test → test pages, development tools, debug interfaces\n"
-            "14) E-commerce Page → product listings, shopping pages (without payment)\n"
-            "15) 404/NOT Found → error pages, not found pages\n"
-            "16) Other → none of the above\n\n"
-            "Consider both the visual content AND the URL path when classifying.\n"
+            "5) Downloadable File → generic downloadable binary/file dialog (.zip, .sql, .bin, etc.)\n"
+            "6) Source Code → exposed source code, .git directories, version control\n"
+            "7) Config/Environment → configuration files, settings, environment variables\n"
+            "8) Logs/Debug → log files, debug output, stack traces, error details\n"
+            "9) Login Panel → authentication forms, sign-in pages (NOT admin panels)\n"
+            "10) Payment Info → payment forms, credit card fields, billing pages\n"
+            "11) PII/User Data → personal information, user profiles, private data\n"
+            "12) Internal/Restricted → internal tools, staging environments, restricted access\n"
+            "13) API Documentation → Swagger, API docs, endpoint documentation\n"
+            "14) Development/Test → test pages, development tools, debug interfaces\n"
+            "15) E-commerce Page → product listings, shopping pages (without payment)\n"
+            "16) 404/NOT Found → error pages, not found pages\n"
+            "17) Other → none of the above\n\n"
             "Respond ONLY with the category name exactly as listed above."
         )
 
