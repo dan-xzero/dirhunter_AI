@@ -91,6 +91,21 @@ def take_screenshot(url, output_path):
         # Take screenshot
         driver.save_screenshot(output_path)
         print(f"[✔] Screenshot saved: {output_path}")
+
+        # Capture page text content for JS-rendered pages
+        try:
+            page_text = driver.execute_script("return document.body.innerText || '';")
+        except Exception:
+            page_text = ''
+
+        text_path = output_path.rsplit('.', 1)[0] + '.txt'
+        if page_text.strip():
+            with open(text_path, 'w', encoding='utf-8') as tp:
+                tp.write(page_text)
+            print(f"[i] Page text saved: {text_path}")
+        else:
+            # create empty file to signal capture attempt
+            open(text_path, 'w').close()
         
     except Exception as e:
         print(f"[!] Screenshot failed for {url}: {e}")

@@ -3,6 +3,7 @@ import os
 from dotenv import load_dotenv
 from collections import defaultdict
 from datetime import datetime
+from utils.tech_helpers import aggregate_cves, severity_from_count
 
 load_dotenv(override=True)
 REPORT_BASE_URL = os.getenv("REPORT_BASE_URL")
@@ -17,6 +18,12 @@ def send_consolidated_slack_alert(all_results, webhook_url):
     # Aggregate statistics
     total_domains = len(all_results)
     total_findings = sum(len(findings) for findings in all_results.values())
+    # ----------------------------------------------------------------
+    # CVE aggregation across all findings
+    # ----------------------------------------------------------------
+    all_findings_flat = [f for findings in all_results.values() for f in findings if f]
+    global_cve_summary = aggregate_cves(all_findings_flat)
+    total_cves = global_cve_summary["total"]
     
     # Count by status and category
     status_counts = defaultdict(int)
@@ -25,10 +32,11 @@ def send_consolidated_slack_alert(all_results, webhook_url):
     domain_stats = {}
     
     for domain, findings in all_results.items():
-        domain_new = 0
-        domain_changed = 0
-        domain_existing = 0
+        domain_new = domain_changed = domain_existing = 0
+        domain_secrets = 0
+        domain_cves    = 0
         
+        secret_urls = []
         for finding in findings:
             # Count by status
             status = finding.get('finding_status', 'unknown')
@@ -45,6 +53,12 @@ def send_consolidated_slack_alert(all_results, webhook_url):
             category = finding.get('ai_tag', 'Other')
             category_counts[category] += 1
             
+            # Secrets via trufflehog
+            secrets = finding.get('download_meta', {}).get('th_secrets', []) if finding.get('download_meta') else []
+            if secrets:
+                domain_secrets += len(secrets)
+                secret_urls.append(finding['url'])
+
             # Collect high priority findings
             from utils.ai_analyzer import get_category_priority
             priority = get_category_priority(category)
@@ -57,11 +71,16 @@ def send_consolidated_slack_alert(all_results, webhook_url):
                     'priority': priority
                 })
         
+        # CVE summary per domain
+        domain_cves = aggregate_cves(findings)["total"] if findings else 0
         domain_stats[domain] = {
             'total': len(findings),
             'new': domain_new,
             'changed': domain_changed,
-            'existing': domain_existing
+            'existing': domain_existing,
+            'secrets': domain_secrets,
+            'cves': domain_cves,
+            'secret_urls': secret_urls
         }
     
     # Sort high priority findings
@@ -87,6 +106,8 @@ def send_consolidated_slack_alert(all_results, webhook_url):
     summary_lines.append(f"*📊 Overall Statistics*")
     summary_lines.append(f"• Domains scanned: `{total_domains}`")
     summary_lines.append(f"• Total findings: `{total_findings}`")
+    if total_cves:
+        summary_lines.append(f"• Total CVEs: `{total_cves}`")
     
     # Status breakdown with visual indicators
     if status_counts.get('new', 0) > 0 or status_counts.get('changed', 0) > 0:
@@ -185,6 +206,20 @@ def send_consolidated_slack_alert(all_results, webhook_url):
             domain_text += "\n"
         else:
             domain_text += f"  ✅ All findings are existing ({stats['existing']})\n"
+
+        if stats.get('secrets'):
+            domain_text += f"  🔑 Secrets detected: {stats['secrets']}\n"
+            # Show up to 3 URLs with secrets
+            for u in stats.get('secret_urls', [])[:3]:
+                domain_text += f"     • <{u}|download>\n"
+            if len(stats.get('secret_urls', [])) > 3:
+                domain_text += f"     _...and {len(stats['secret_urls'])-3} more_\n"
+        
+        if stats.get('cves'):
+            sev = severity_from_count(stats['cves'])
+            emoji_map = {'Critical':'🔴','High':'🟠','Medium':'🟡','Low':'🟢'}
+            icon = emoji_map.get(sev,'⚠️')
+            domain_text += f"  {icon} CVEs: {stats['cves']} ({sev})\n"
         
         # Add report link
         report_link = f"{REPORT_BASE_URL}/reports/{domain}_tags.html"
@@ -197,6 +232,27 @@ def send_consolidated_slack_alert(all_results, webhook_url):
             "text": domain_text[:3000]  # Slack limit
         }
     })
+    # ---------------- Top vulnerable packages section ----------------
+    if global_cve_summary["packages"]:
+        packages_sorted = [it for it in sorted(global_cve_summary["packages"].items(), key=lambda x: -x[1]["count"]) if it[0].lower() not in {"null", "none"}][:5]
+        vuln_text = "*🩹 Top Vulnerable Packages*\n"
+        for pkg, info in packages_sorted:
+            sev = info.get('severity')
+            count = info.get('count')
+            ver = info.get('version', '')
+            icon = {'Critical':'🔴','High':'🟠','Medium':'🟡','Low':'🟢'}.get(sev,'⚠️')
+            pkg_label = f"{pkg}@{ver}" if ver else pkg
+            ids_preview = ', '.join(info.get('ids', [])[:3])
+            vuln_text += f"• {icon} `{pkg_label}` – {count} CVEs ({sev}) [{ids_preview}]\n"
+
+        blocks.append({
+            "type": "divider"
+        })
+
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": vuln_text[:3000]}
+        })
     
     # Dashboard link with call-to-action
     blocks.append({"type": "divider"})
@@ -233,12 +289,12 @@ def send_consolidated_slack_alert(all_results, webhook_url):
     
     # Prepare the payload
     payload = {
-        "text": f"Security scan complete: {total_domains} domains, {total_findings} findings ({status_counts.get('new', 0)} new)",  # Fallback text
+        "text": f"Security scan complete: {total_domains} domains, {total_findings} findings, {total_cves} CVEs",  # Fallback text
         "blocks": blocks[:50],  # Slack limit of 50 blocks
         "unfurl_links": False,
         "unfurl_media": False
     }
-    
+
     try:
         response = requests.post(webhook_url, json=payload)
         if response.status_code != 200:

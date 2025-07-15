@@ -35,7 +35,7 @@ CATEGORY_PRIORITY = {
     "Other": 0
 }
 
-def classify_screenshot_with_gpt(screenshot_path, url_context=None):
+def classify_screenshot_with_gpt(screenshot_path, url_context=None, page_text=None):
     """
     Enhanced classification with URL context and better prompting.
     Now includes additional categories and uses URL for better context.
@@ -53,7 +53,11 @@ def classify_screenshot_with_gpt(screenshot_path, url_context=None):
         )
         
         if url_context:
-            prompt_text += f"URL Context: {url_context}\n\n"
+            prompt_text += f"URL Context (for reference only, ignore in visual judgement): {url_context}\n\n"
+
+        # Append visible page text if available (helps JS-rendered pages)
+        if page_text:
+            prompt_text += "Visible Page Text (may aid classification):\n" + page_text[:1000] + "\n\n"
         
         prompt_text += (
             "Categories (in order of security priority):\n"
@@ -156,12 +160,13 @@ def batch_classify_screenshots(screenshot_tasks, max_workers=3):
     def classify_single(task):
         screenshot_path = task['screenshot_path']
         url = task.get('url', '')
+        page_text = task.get('page_text')
         
         # Try URL pattern first for efficiency
         url_classification = classify_by_url_pattern(url)
         
         # Use GPT vision for verification or if URL pattern doesn't match
-        gpt_classification = classify_screenshot_with_gpt(screenshot_path, url)
+        gpt_classification = classify_screenshot_with_gpt(screenshot_path, url_context=url, page_text=page_text)
         
         # If URL pattern matches and has higher priority, use it
         if url_classification and get_category_priority(url_classification) >= get_category_priority(gpt_classification):

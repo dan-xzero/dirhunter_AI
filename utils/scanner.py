@@ -1,6 +1,27 @@
 # File: dirhunter_ai/utils/scanner.py
 import subprocess, json, tempfile, os, shlex, requests
+from pathlib import Path
 from utils.db_handler import track_rate_limit, get_pending_rate_limits, mark_rate_limit_completed
+from utils.rate_control import get_rate, update_stats
+from utils.ffuf_progress import get_last_position, update_position
+
+# Cache ffuf capability detection
+_FFUF_SUPPORTS_RESUME = None
+
+
+def _ffuf_supports_resume():
+    """Return True if installed ffuf binary supports --resume-from flag."""
+    global _FFUF_SUPPORTS_RESUME  # pylint: disable=global-statement
+    if _FFUF_SUPPORTS_RESUME is not None:
+        return _FFUF_SUPPORTS_RESUME
+
+    try:
+        out = subprocess.run(["ffuf", "-h"], capture_output=True, text=True, timeout=5)
+        _FFUF_SUPPORTS_RESUME = "-resume-from" in out.stdout
+    except Exception:
+        _FFUF_SUPPORTS_RESUME = False
+    return _FFUF_SUPPORTS_RESUME
+
 
 def smart_resolve_scheme(domain):
     if domain.startswith("http://") or domain.startswith("https://"):
@@ -28,7 +49,33 @@ def run_ffuf(domain,
              delay     = None,
              resume_from = None
              ):
+
+    # ------------------------------------------------------------
+    # Sanitize wordlist – remove a single leading '/' if present
+    # ------------------------------------------------------------
+    sanitized_wordlist = wordlist
+    try:
+        # Only create a sanitized copy once per original wordlist path
+        # Cache file alongside original with .noslash suffix
+        p = Path(wordlist)
+        if p.exists():
+            sanitized = p.with_suffix(p.suffix + ".noslash")
+            if not sanitized.exists() or sanitized.stat().st_mtime < p.stat().st_mtime:
+                with p.open("r", encoding="utf-8", errors="ignore") as src, sanitized.open("w", encoding="utf-8") as dst:
+                    for line in src:
+                        ln = line.rstrip("\n\r")
+                        if ln.startswith('/') and not ln.startswith('//'):
+                            ln = ln[1:]
+                        dst.write(ln + "\n")
+            sanitized_wordlist = str(sanitized)
+    except Exception:
+        # Fallback to original list on any error
+        sanitized_wordlist = wordlist
+
     domain = smart_resolve_scheme(domain)
+
+    # Determine adaptive rate
+    adaptive_rate = get_rate(domain.replace("http://", "").replace("https://", ""), rate)
 
     url           = f"{domain}/FUZZ"
     output_file   = tempfile.NamedTemporaryFile(delete=False, suffix=".json").name
@@ -37,7 +84,7 @@ def run_ffuf(domain,
     cmd = [
         "ffuf",
         "-u",  url,
-        "-w",  wordlist,
+        "-w",  sanitized_wordlist,
         # "-e",  extension_arg,
         "-t",  str(threads),
         "-o",  output_file,
@@ -48,13 +95,16 @@ def run_ffuf(domain,
         "-H", "User-agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36-FUZZ"
     ]
 
-    if rate and int(rate) > 0:
-        cmd += ["-rate", str(rate)]
+    if adaptive_rate and int(adaptive_rate) > 0:
+        cmd += ["-rate", str(adaptive_rate)]
     if delay:
         cmd += ["-p", str(delay)]
     
-    # Resume from specific position if retrying rate limited paths
-    if resume_from:
+    # Allow manual override but otherwise use stored progress
+    if resume_from is None and _ffuf_supports_resume():
+        resume_from = get_last_position(domain.replace("http://", "").replace("https://", ""), wordlist)
+
+    if resume_from and _ffuf_supports_resume():
         cmd += ["-resume-from", str(resume_from)]
 
     # --- run -----------------------------------------------------------
@@ -73,7 +123,11 @@ def run_ffuf(domain,
             # Track wordlist for rate limit recovery
             wordlist_used = data.get("config", {}).get("wordlist", wordlist)
             
-            for idx, item in enumerate(data.get("results", [])):
+            result_items = data.get("results", [])
+            total_requests = len(result_items)
+
+            max_pos = resume_from or 0
+            for idx, item in enumerate(result_items):
                 result = {
                     "url":    item["url"],
                     "status": item["status"],
@@ -95,6 +149,9 @@ def run_ffuf(domain,
                                    result["path"], idx)
                 else:
                     results.append(result)
+
+                if idx > max_pos:
+                    max_pos = idx
                     
     except Exception as e:
         print(f"[!] JSON parse error: {e}")
@@ -104,6 +161,20 @@ def run_ffuf(domain,
         print(f"[!] Found {len(rate_limited_paths)} rate-limited (429) responses")
         print(f"[!] These paths will be retried later with reduced rate")
     
+    # Update adaptive rate stats
+    try:
+        update_stats(domain.replace("http://", "").replace("https://", ""),
+                     total_requests=len(results) + len(rate_limited_paths),
+                     num_429=len(rate_limited_paths))
+    except Exception:
+        pass
+
+    # Persist new progress index
+    try:
+        update_position(domain.replace("http://", "").replace("https://", ""), wordlist_used, max_pos)
+    except Exception:
+        pass
+
     return results, rate_limited_paths
 
 

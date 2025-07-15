@@ -4,8 +4,33 @@ import os
 from datetime import datetime
 from collections import defaultdict
 import json
+import requests
+from functools import lru_cache
+from utils.tech_helpers import extract_tech_and_cves, aggregate_cves, severity_from_count
 
 HTML_REPORT_DIR = "results/html"
+
+# ------------------------------------------------------------
+# Helper for CVE descriptions (OSV.dev) – cached in-memory so repeated
+# look-ups are fast. We only fetch when building HTML and will silently
+# ignore network failures.
+# ------------------------------------------------------------
+
+
+@lru_cache(maxsize=2048)
+def _fetch_cve_summary(cve_id: str) -> str:
+    """Return short summary/description for the given CVE/GHSA id."""
+    if not cve_id:
+        return ""
+    url = f"https://api.osv.dev/v1/vuln/{cve_id}"
+    try:
+        resp = requests.get(url, timeout=6)
+        if resp.status_code == 200:
+            data = resp.json()
+            return data.get("summary") or (data.get("details") or "")[:200]
+    except Exception:
+        pass
+    return ""
 
 def create_dashboard(all_domains_data):
     """
@@ -15,6 +40,8 @@ def create_dashboard(all_domains_data):
     
     dashboard_file = os.path.join(HTML_REPORT_DIR, "dashboard.html")
     
+    spark_svg = ""  # timeline placeholder
+
     # Aggregate statistics
     total_domains = len(all_domains_data)
     total_findings = sum(len(findings) for findings in all_domains_data.values())
@@ -22,6 +49,8 @@ def create_dashboard(all_domains_data):
     # Count by status and category across all domains
     global_status_counts = defaultdict(int)
     global_category_counts = defaultdict(int)
+    global_secret_count   = 0
+    # Will compute global CVE count later
     high_priority_findings = []
     
     for domain, findings in all_domains_data.items():
@@ -31,6 +60,10 @@ def create_dashboard(all_domains_data):
             
             category = finding.get('ai_tag', 'Other')
             global_category_counts[category] += 1
+
+            # Count secrets at finding level
+            secret_cnt = len(finding.get('download_meta', {}).get('th_secrets', [])) if finding.get('download_meta') else 0
+            global_secret_count += secret_cnt
             
             # Collect high priority findings
             from utils.ai_analyzer import get_category_priority
@@ -47,6 +80,12 @@ def create_dashboard(all_domains_data):
     
     # Sort high priority findings
     high_priority_findings.sort(key=lambda x: (-x['priority'], x['domain'], x['url']))
+
+    # ------------------------------------------------------------
+    # Global CVE summary across all findings
+    # ------------------------------------------------------------
+    all_findings_list = [f for findings in all_domains_data.values() for f in findings if f]
+    global_cve_total  = aggregate_cves(all_findings_list)["total"]
     
     # Build dashboard HTML
     html = f"""
@@ -131,6 +170,14 @@ def create_dashboard(all_domains_data):
             .stat-card.existing {{
                 border-left: 4px solid #6b7280;
                 background: linear-gradient(to right, rgba(107, 114, 128, 0.05), white);
+            }}
+            .stat-card.secrets {{
+                border-left: 4px solid #be123c;
+                background: linear-gradient(to right, rgba(190, 18, 60, 0.05), white);
+            }}
+            .stat-card.cves {{
+                border-left: 4px solid #b91c1c;
+                background: linear-gradient(to right, rgba(185, 28, 28, 0.05), white);
             }}
             
             .section {{
@@ -267,6 +314,35 @@ def create_dashboard(all_domains_data):
                 font-size: 0.875rem;
                 margin-top: 2rem;
             }}
+
+            /* Filter controls */
+            .filters {{
+                display:flex;
+                gap:0.75rem;
+                flex-wrap:wrap;
+                margin:1rem 0 1.5rem;
+                align-items:center;
+            }}
+            .filters input {{
+                flex:1 1 220px;
+                padding:0.5rem 0.75rem;
+                border:1px solid #d1d5db;
+                border-radius:6px;
+                font-size:0.9rem;
+            }}
+            .filter-btn {{
+                padding:0.4rem 0.9rem;
+                background:#e5e7eb;
+                border:none;
+                border-radius:6px;
+                cursor:pointer;
+                font-size:0.8rem;
+            }}
+            .filter-btn.active {{
+                background:#6366f1;
+                color:#fff;
+            }}
+            .hidden {{ display:none !important; }}
         </style>
     </head>
     <body>
@@ -274,6 +350,7 @@ def create_dashboard(all_domains_data):
             <div class="container">
                 <h1>🔍 DirHunter AI Security Dashboard</h1>
                 <div class="subtitle">Comprehensive vulnerability discovery and analysis</div>
+                {spark_svg}
             </div>
         </div>
         
@@ -299,6 +376,14 @@ def create_dashboard(all_domains_data):
                 <div class="stat-card existing">
                     <h3>✅ Existing Findings</h3>
                     <p class="value">{global_status_counts.get('existing', 0)}</p>
+                </div>
+                <div class="stat-card secrets">
+                    <h3>🕵️ Secrets</h3>
+                    <p class="value">{global_secret_count}</p>
+                </div>
+                <div class="stat-card cves">
+                    <h3>⚠️ CVEs</h3>
+                    <p class="value">{global_cve_total}</p>
                 </div>
             </div>
             
@@ -363,6 +448,15 @@ def create_dashboard(all_domains_data):
             <!-- Domain Summary Table -->
             <div class="section">
                 <h2>🌐 Domain Summary</h2>
+                <div class="filters">
+                    <input id="domainSearch" placeholder="🔍 Search domain..." />
+                    <button class="filter-btn active" data-filter="all">All</button>
+                    <button class="filter-btn" data-filter="new">New</button>
+                    <button class="filter-btn" data-filter="changed">Changed</button>
+                    <button class="filter-btn" data-filter="existing">Existing</button>
+                    <button class="filter-btn" data-filter="secrets">Secrets</button>
+                    <button class="filter-btn" data-filter="cves">CVEs</button>
+                </div>
                 <table class="domains-table">
                     <thead>
                         <tr>
@@ -371,6 +465,8 @@ def create_dashboard(all_domains_data):
                             <th>New</th>
                             <th>Changed</th>
                             <th>High Priority</th>
+                            <th>Secrets</th>
+                            <th>CVEs</th>
                             <th>Report</th>
                         </tr>
                     </thead>
@@ -385,13 +481,20 @@ def create_dashboard(all_domains_data):
         changed_count = sum(1 for f in findings if f.get('finding_status') == 'changed')
         high_priority_count = sum(1 for f in findings if get_category_priority(f.get('ai_tag', 'Other')) >= 7)
         
+        # Secrets count per domain
+        secret_count = sum(len(f.get('download_meta', {}).get('th_secrets', [])) for f in findings if f and f.get('download_meta'))
+        cve_count    = aggregate_cves(findings)["total"]
+        existing_count = len(findings) - new_count - changed_count
+
         html += f"""
-                        <tr>
+                        <tr data-domain="{domain}" data-new="{new_count}" data-changed="{changed_count}" data-existing="{existing_count}" data-secrets="{secret_count}" data-cves="{cve_count}">
                             <td><strong>{domain}</strong></td>
                             <td>{len(findings)}</td>
                             <td>{new_count}</td>
                             <td>{changed_count}</td>
                             <td>{high_priority_count}</td>
+                            <td>{secret_count}</td>
+                            <td>{cve_count}</td>
                             <td><a href="{domain}_tags.html">View</a></td>
                         </tr>
         """
@@ -402,9 +505,55 @@ def create_dashboard(all_domains_data):
             </div>
             
             <div class="timestamp">
-                Generated on {datetime.now().strftime('%Y-%m-%d at %H:%M:%S UTC')}
+                Generated on {datetime.now().strftime('%Y-%m-%d at %H:%M:%S UTC')} – adaptive rate control active
             </div>
         </div>
+        <script>
+        (function() {{
+            const searchInput = document.getElementById('domainSearch');
+            const filterBtns  = document.querySelectorAll('.filter-btn');
+            let currentFilter = 'all';
+
+            function applyFilters() {{
+                const q = (searchInput.value || '').toLowerCase();
+                document.querySelectorAll('.domains-table tbody tr').forEach(row => {{
+                    const domain    = row.dataset.domain.toLowerCase();
+                    const newCnt    = parseInt(row.dataset.new);
+                    const chgCnt    = parseInt(row.dataset.changed);
+                    const existCnt  = parseInt(row.dataset.existing);
+                    const secCnt    = parseInt(row.dataset.secrets);
+                    const cvesCnt   = parseInt(row.dataset.cves);
+
+                    let passesFilter = false;
+                    switch(currentFilter) {{
+                        case 'all':      passesFilter = true; break;
+                        case 'new':      passesFilter = newCnt   > 0; break;
+                        case 'changed':  passesFilter = chgCnt   > 0; break;
+                        case 'existing': passesFilter = existCnt > 0; break;
+                        case 'secrets':  passesFilter = secCnt   > 0; break;
+                        case 'cves':     passesFilter = cvesCnt  > 0; break;
+                    }}
+
+                    const matchesSearch = q === '' || domain.includes(q);
+                    if(passesFilter && matchesSearch) {{
+                        row.classList.remove('hidden');
+                    }} else {{
+                        row.classList.add('hidden');
+                    }}
+                }});
+            }}
+
+            searchInput.addEventListener('input', applyFilters);
+            filterBtns.forEach(btn => {{
+                btn.addEventListener('click', () => {{
+                    filterBtns.forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                    currentFilter = btn.dataset.filter;
+                    applyFilters();
+                }});
+            }});
+        }})();
+        </script>
     </body>
     </html>
     """
@@ -426,6 +575,8 @@ def export_tag_based_reports(domain, findings, output_dir=HTML_REPORT_DIR):
     # Group results by AI tag
     grouped = defaultdict(list)
     for f in findings:
+        if f is None:
+            continue
         tag = f.get("ai_tag", "Other")
         grouped[tag].append(f)
 
@@ -467,6 +618,15 @@ def export_tag_based_reports(domain, findings, output_dir=HTML_REPORT_DIR):
                 color: #6366f1;
                 text-decoration: none;
             }}
+            #searchBox {{{{
+                width: 100%;
+                padding: 0.75rem 1rem;
+                margin: 1rem 0 2rem;
+                border: 1px solid #d1d5db;
+                border-radius: 6px;
+                font-size: 1rem;
+            }}}}
+            .hidden {{{{ display:none !important; }}}}
             .container {{
                 max-width: 1200px;
                 margin: 0 auto;
@@ -527,6 +687,7 @@ def export_tag_based_reports(domain, findings, output_dir=HTML_REPORT_DIR):
         </style>
     </head>
     <body>
+        <input id="searchBox" placeholder="🔍 Search findings... (supports URL & tag)" />
         <div class="header">
             <div class="container">
                 <h1>{domain}</h1>
@@ -548,10 +709,15 @@ def export_tag_based_reports(domain, findings, output_dir=HTML_REPORT_DIR):
         # Get status counts for this tag
         status_counts = defaultdict(int)
         for item in items:
+            if item is None:
+                continue
             status_counts[item.get('finding_status', 'unknown')] += 1
         
         # Pick representative screenshot
-        rep_item = items[0]
+        rep_item = next((it for it in items if it is not None), None)
+        if rep_item is None:
+            continue
+
         screenshot_html = ""
         if rep_item.get("screenshot") and os.path.exists(rep_item["screenshot"]):
             screenshot_rel = os.path.relpath(rep_item["screenshot"], output_dir)
@@ -562,7 +728,7 @@ def export_tag_based_reports(domain, findings, output_dir=HTML_REPORT_DIR):
         # Create tag card
         tag_slug = slugify_tag(tag)
         subpage_name = f"{domain}_tag_{tag_slug}.html"
-        
+
         html += f"""
                 <a href="{subpage_name}">
                     <div class="tag-card">
@@ -596,6 +762,20 @@ def export_tag_based_reports(domain, findings, output_dir=HTML_REPORT_DIR):
                 Generated on {datetime.now().strftime('%Y-%m-%d at %H:%M:%S UTC')}
             </div>
         </div>
+        <script>
+        const searchBox = document.getElementById('searchBox');
+        searchBox?.addEventListener('input', function() {{{{
+            const q = this.value.toLowerCase();
+            document.querySelectorAll('.tag-card').forEach(card => {{{{
+                const text = card.innerText.toLowerCase();
+                if(q === '' || text.indexOf(q) !== -1) {{{{
+                    card.classList.remove('hidden');
+                }}}} else {{{{
+                    card.classList.add('hidden');
+                }}}}
+            }}}});
+        }}}});
+        </script>
     </body>
     </html>
     """
@@ -611,6 +791,11 @@ def make_enhanced_subpage_for_tag(domain, tag, items, subpage_name, output_dir):
     """
     Creates an enhanced subpage with better styling and status indicators
     """
+    # Remove any None placeholders
+    items = [itm for itm in items if itm is not None]
+    if not items:
+        return  # nothing to render
+
     subpage_path = os.path.join(output_dir, subpage_name)
 
     html = f"""
@@ -775,21 +960,13 @@ def make_enhanced_subpage_for_tag(domain, tag, items, subpage_name, output_dir):
                             <div class="metadata-item">
                                 <strong>Times Seen:</strong> {f.get('times_seen', 1)}
                             </div>
-        """
         
-        if f.get('first_seen'):
-            first_seen = f['first_seen']
-            if isinstance(first_seen, str) and 'T' in first_seen:
-                # Format datetime if it's in ISO format
-                try:
-                    from datetime import datetime
-                    dt = datetime.fromisoformat(first_seen.replace('Z', '+00:00'))
-                    first_seen = dt.strftime('%Y-%m-%d %H:%M')
-                except:
-                    pass
-            html += f"""
                             <div class="metadata-item">
-                                <strong>First Seen:</strong> {first_seen}
+                                <strong>VirusTotal:</strong> {f.get('vt_status', 'N/A')}
+                            </div>
+        
+                            <div class="metadata-item">
+                                <strong>First Seen:</strong> {f.get('first_seen','')}
                             </div>
             """
         
@@ -813,6 +990,113 @@ def make_enhanced_subpage_for_tag(domain, tag, items, subpage_name, output_dir):
                     </div>
                 </div>
         """
+
+        # ---- security & technology badges ----
+        vt = f.get('vt') or {}
+        vt_badge = ""
+        if vt:
+            pos = vt.get('positives', 0)
+            total = vt.get('total', 0)
+            color = '#dc2626' if pos else '#059669'
+            vt_badge = f"<span style='background:{color};color:#fff;padding:2px 6px;border-radius:4px;font-size:0.75rem' title='VirusTotal positives/total'>VT {pos}/{total}</span>"
+
+        # Download meta for secrets
+        download_meta = f.get('download_meta') or {}
+
+        # Technology & CVEs
+        tech_badges, cve_summary = extract_tech_and_cves(f.get('tech') or {})
+
+        # If summary only has _total (no package details) treat as empty for fallback
+        if set(cve_summary.keys()) == {"_total"}:
+            cve_summary = {}
+
+        # If still empty, fallback to download_meta
+        if not cve_summary and download_meta.get('cve_details'):
+            for pkg, info in (download_meta.get('cve_details') or {}).items():
+                if pkg.lower() in {"null", "none", "_total"}:
+                    continue
+                if isinstance(info, dict):
+                    ids = info.get('ids', [])
+                    version = info.get('version','')
+                else:
+                    ids = info
+                    version = ''
+                cve_summary[pkg] = {
+                    'count': len(ids),
+                    'ids': ids,
+                    'version': version,
+                    'severity': severity_from_count(len(ids))
+                }
+
+        tech_badge_html = " ".join(
+            f"<span style='background:#6b7280;color:#fff;padding:2px 6px;border-radius:4px;font-size:0.75rem'>{b}</span>" for b in tech_badges
+        )
+
+        total_cve_cnt = sum(info['count'] for info in cve_summary.values())
+        if not total_cve_cnt:
+            tech_dict = f.get('tech') or {}
+            total_cve_cnt = tech_dict.get('cve_vulns', 0) or 0
+        cve_badge = ""
+        if total_cve_cnt:
+            sev  = severity_from_count(total_cve_cnt)
+            color_map = {'Critical':'#991b1b','High':'#b91c1c','Medium':'#d97706','Low':'#f59e0b'}
+            color = color_map.get(sev, '#b91c1c')
+            cve_badge = f"<span style='background:{color};color:#fff;padding:2px 6px;border-radius:4px;font-size:0.75rem' title='CVE severity {sev}'>{sev} CVE {total_cve_cnt}</span>"
+
+        # Secrets badge
+        secret_cnt = len(download_meta.get('th_secrets', []))
+        secret_badge = ""
+        if secret_cnt:
+            secret_badge = f"<span style='background:#be123c;color:#fff;padding:2px 6px;border-radius:4px;font-size:0.75rem' title='Secrets detected by TruffleHog'>SECRETS {secret_cnt}</span>"
+
+        if vt_badge or cve_badge or secret_badge or tech_badge_html:
+            html += f"""
+                            <div class="metadata-item">{vt_badge} {cve_badge} {secret_badge} {tech_badge_html}</div>
+            """
+
+        # Collapsible CVE details table
+        if cve_summary:
+            html += """
+                            <details style='margin-top:0.5rem;font-size:0.8rem'>
+                                <summary style='cursor:pointer;'>CVE Details</summary>
+                                <table style='margin-top:0.5rem;border-collapse:collapse'>
+                                    <thead><tr><th style='padding:2px 6px;text-align:left'>Package</th><th style='padding:2px 6px'>Version</th><th style='padding:2px 6px'>Count</th><th style='padding:2px 6px'>Severity</th><th style='padding:2px 6px'>IDs</th></tr></thead>
+            <tbody>
+            """
+            for pkg, info in cve_summary.items():
+                if pkg.lower() in {"null", "none", "_total"}:
+                    continue
+                ver = info.get('version','')
+                id_links: list[str] = []
+                full_ids = info.get('ids', [])
+                for _cid in full_ids[:5]:
+                    # Build external link (NVD for CVE, GitHub for GHSA, fallback google)
+                    if _cid.startswith('CVE'):
+                        href = f"https://nvd.nist.gov/vuln/detail/{_cid}"
+                    elif _cid.lower().startswith('ghsa'):
+                        href = f"https://github.com/advisories/{_cid}"
+                    else:
+                        href = f"https://www.google.com/search?q={_cid}"
+
+                    desc = _fetch_cve_summary(_cid)
+                    if desc:
+                        safe_desc = (
+                            desc.replace("'", "&#39;").replace('"', "&quot;")[:240]
+                        )
+                        title_attr = f' title="{safe_desc}"'
+                    else:
+                        title_attr = ''
+                    id_links.append(f"<a href='{href}' target='_blank'{title_attr}>{_cid}</a>")
+
+                extra_cnt = len(full_ids) - 5
+                if extra_cnt > 0:
+                    id_links.append(f"…+{extra_cnt} more")
+                ids_html = ', '.join(id_links)
+                tooltip = f"title='{pkg} vulnerabilities'"
+                html += f"<tr><td style='padding:2px 6px' {tooltip}>{pkg}</td><td style='padding:2px 6px'>{ver}</td><td style='padding:2px 6px;text-align:center'>{info['count']}</td><td style='padding:2px 6px'>{info['severity']}</td><td style='padding:2px 6px;font-size:0.7rem'>{ids_html}</td></tr>"
+            html += """
+                                    </tbody></table></details>
+            """
 
     html += f"""
             </div>

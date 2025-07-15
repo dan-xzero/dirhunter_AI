@@ -12,3 +12,6 @@ THREADS = 50
 # Directories for output
 SCREENSHOT_DIR = "results/screenshots"
 RAW_RESULTS_DIR = "results/raw"
+
+# Retention policy for cleanup (days)
+CLEANUP_DAYS = 30

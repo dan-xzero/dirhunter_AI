@@ -14,6 +14,9 @@ An intelligent AI-powered web security scanning platform that combines directory
 ✅ **Slack Integration** - Consolidated notifications with rich formatting  
 ✅ **Parallel Processing** - Configurable workers for screenshots and scanning  
 ✅ **Modern Dashboard** - Beautiful, responsive web interface with priority-based findings  
+✅ **Tech Fingerprinting** - Fast regex plus Wappalyzer detection with outdated-version flag  
+✅ **CVE Detection** - OSV.dev API checks package manifests for known vulnerabilities  
+✅ **Auto Cleanup** - Old screenshots/raw JSON auto-purged after 30 days to save disk space  
 
 ---
 
@@ -83,9 +86,15 @@ The system intelligently categorizes findings into 16 security-relevant categori
 ## ⚙ Prerequisites
 
 - **Python 3.10+**
+- **Node.js ≥ 18** (for Wappalyzer CLI)
+- **Wappalyzer CLI** - Technology fingerprinting (`npm i -g @wappalyzer/cli`)
 - **FFUF** - Fast web fuzzer (`brew install ffuf` or download from GitHub)
 - **Chrome/Chromium** - For screenshot capture
 - **Slack App** (optional) - For notifications and slash commands
+
+> ℹ️ The project now uses the **official Wappalyzer CLI** instead of the deprecated Python package. Ensure the binary `wappalyzer` is in your `$PATH`.
+
+> CVE look-ups are powered by the public **OSV.dev v1 API** – no key required.
 
 ---
 
@@ -95,6 +104,16 @@ The system intelligently categorizes findings into 16 security-relevant categori
 
 ```bash
 pip install -r requirements.txt
+
+# Install Wappalyzer CLI (global)
+npm i -g @wappalyzer/cli
+```
+
+Note: `ssdeep` is optional; if unavailable the fuzzy-hash logic falls back gracefully. To enable fuzzy duplicate detection install it via Homebrew (`brew install ssdeep`) or the provided helper:
+
+```bash
+chmod +x setup_ssdeep_env.sh
+./setup_ssdeep_env.sh
 ```
 
 ### 2. Set up ssdeep (for fuzzy hashing)
@@ -118,6 +137,9 @@ SLACK_SIGNING_SECRET=your-signing-secret
 REPORT_BASE_URL=https://your-ngrok-or-server.com
 NGROK_URL=https://your-ngrok-tunnel.ngrok.io
 
+# CVE/Tech fingerprinting
+WAPPALYZER_BINARY=/usr/local/bin/wappalyzer   # override if not in PATH
+
 # AI Classification
 OPENAI_API_KEY=sk-your-openai-api-key
 ```
@@ -127,6 +149,12 @@ OPENAI_API_KEY=sk-your-openai-api-key
 Edit domain lists:
 - `domains/prod_domains.txt` - Production targets
 - `domains/nonprod_domains.txt` - Development/testing targets
+
+---
+
+## 🧹 Cleanup Rotation
+
+Results older than **30 days** are automatically deleted at the start of each `main_optimized.py` run. Adjust retention by editing `CLEANUP_DAYS` in `config.py`.
 
 ---
 
@@ -389,4 +417,59 @@ For issues, feature requests, or custom implementations:
 ---
 
 **Happy Hunting! 🎯** 
+
+---
+
+## 🧪 Testing & Quick Start
+
+1. Install dependencies (virtual-env recommended):
+
+```bash
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+# Optional fuzzy hashing
+./setup_ssdeep_env.sh
+```
+
+2. Run a smoke test against example domains list:
+
+```bash
+python main_optimized.py --domains domains/prod_domains.txt --wordlist wordlists/wordlist_prod.txt --parallel-domains 3 --screenshot-workers 3 --performance-report
+```
+
+3. Open `results/html/dashboard.html` in your browser to review findings.
+
+Logs and summaries are written to the `logs/` directory; use them to verify cleanup rotation and new CVE / tech badges in reports. 
+
+---
+
+## 🧪 Running Tests
+
+The repository ships with a small pytest suite covering technology fingerprinting helpers and Slack CVE aggregation logic.
+
+```bash
+pytest -q
+```
+
+All tests should pass. Continuous integration pipelines can call this command to verify CVE handling remains stable.
+
+---
+
+## 🛡️ Technology Fingerprinting & CVE Visibility
+
+1. **Wappalyzer CLI** scans each discovered URL and saves raw JSON to `results/wappalyzer_raw/`.
+2. Detected `{name, version}` pairs are enriched with CVE data via [OSV.dev](https://osv.dev) batch queries.
+3. The dashboard shows coloured CVE pills and a dedicated stat-card; finding pages include detailed, collapsible CVE tables.
+4. Slack alerts summarise total CVEs, per-domain severities, and list the *top vulnerable packages*.
+
+Severity levels are derived from the number of distinct CVEs for a package:
+
+| Count | Severity |
+|-------|----------|
+| 1     | Low      |
+| 2     | Medium   |
+| 3-4   | High     |
+| ≥5    | Critical |
+
+This heuristic keeps the UI fast without requiring additional CVSS API calls. 
 

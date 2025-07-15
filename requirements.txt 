@@ -4,3 +4,4 @@ python-dotenv==1.0.1
 openai>=1.33.0
 selenium==4.20.0
 pillow==10.3.0
+python-Wappalyzer==0.3.1

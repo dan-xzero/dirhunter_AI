@@ -86,8 +86,10 @@ def check_and_send_critical_alerts(domain, findings, no_critical_alerts=False):
         return
     
     critical_findings = []
+    from utils.ai_analyzer import get_category_priority
     for finding in findings:
-        from utils.ai_analyzer import get_category_priority
+        if finding is None:
+            continue
         priority = get_category_priority(finding.get('ai_tag', 'Other'))
         if priority >= CRITICAL_PRIORITY_THRESHOLD:
             critical_findings.append(finding)
@@ -164,10 +166,22 @@ def process_domain_optimized(domain, wordlist, ignore_hash, screenshot_workers, 
 
         # Batch classify screenshots
         classification_start = time.time()
-        classification_tasks = [
-            {"screenshot_path": entry["screenshot"], "url": entry["url"]}
-            for entry in filtered if entry.get("screenshot") and os.path.exists(entry["screenshot"])
-        ]
+        classification_tasks = []
+        for entry in filtered:
+            if entry.get("screenshot") and os.path.exists(entry["screenshot"]):
+                text_path = entry["screenshot"].rsplit('.',1)[0] + '.txt'
+                page_text = ''
+                if os.path.exists(text_path):
+                    try:
+                        with open(text_path, 'r', encoding='utf-8') as tp:
+                            page_text = tp.read()
+                    except Exception:
+                        pass
+                classification_tasks.append({
+                    "screenshot_path": entry["screenshot"],
+                    "url": entry["url"],
+                    "page_text": page_text
+                })
         
         if classification_tasks:
             classifications = batch_classify_screenshots(classification_tasks, max_workers=3)
@@ -185,6 +199,8 @@ def process_domain_optimized(domain, wordlist, ignore_hash, screenshot_workers, 
 
         # Validate tags
         for entry in filtered:
+            if entry is None:
+                continue
             if not validate_tagged_entry(entry):
                 entry["ai_tag"] = "Other"
 
@@ -294,6 +310,13 @@ class BatchDatabaseWriter:
 
 # ──────────── MAIN ENTRY ────────────
 def main():
+    # Cleanup old results before starting new scan
+    try:
+        from utils.cleanup import cleanup_old_runs
+        cleanup_old_runs()
+    except Exception as e:
+        logger.warning(f"Cleanup failed: {e}")
+
     args = parse_args()
     
     # Initialize database
@@ -350,6 +373,15 @@ def main():
         dashboard_path = create_dashboard(all_results)
         logger.info(f"Dashboard created: {dashboard_path}")
         
+        # Update run history stats for timeline
+        try:
+            total_new = sum(sum(1 for f in fs if f.get('finding_status') == 'new') for fs in all_results.values())
+            total_changed = sum(sum(1 for f in fs if f.get('finding_status') == 'changed') for fs in all_results.values())
+            from utils.run_history import record_run
+            record_run(total_domains=len(all_results), new_findings=total_new, changed_findings=total_changed)
+        except Exception as e:
+            logger.warning(f"Run history update failed: {e}")
+
         # Send daily digest (non-critical findings)
         if WEBHOOK_URL and WEBHOOK_URL.lower() != "none":
             # Filter out critical findings that were already sent
