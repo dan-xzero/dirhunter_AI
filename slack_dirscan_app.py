@@ -47,8 +47,8 @@ HELP_MESSAGE = (
 def get_wordlist_for_domain(domain):
     """Determine which wordlist to use based on domain configuration"""
     try:
-        with open("domains/prod_domains.txt") as f:
-            prod_domains = {d.strip() for d in f if d.strip()}
+    with open("domains/prod_domains.txt") as f:
+        prod_domains = {d.strip() for d in f if d.strip()}
         return "wordlists/wordlist_prod.txt" if domain in prod_domains else "wordlists/wordlist_nonprod.txt"
     except Exception:
         return "wordlists/wordlist_nonprod.txt"
@@ -137,10 +137,10 @@ def run_scan_async(domains, args, response_url, base_url):
             "text": f"✅ Scan complete! View the comprehensive dashboard: {dashboard_url}\n\nThe consolidated results have been posted to the main channel."
         }
     else:
-        followup_message = {
-            "response_type": "in_channel",
+    followup_message = {
+        "response_type": "in_channel",
             "text": f"⚠️ Scan completed with warnings. Check the dashboard for details: {dashboard_url}"
-        }
+    }
     
     try:
         resp = requests.post(response_url, json=followup_message)

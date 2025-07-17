@@ -17,6 +17,7 @@ import queue
 import threading
 import time
 from datetime import datetime
+import psutil  # NEW: for auto-scaling
 
 load_dotenv(override=True)
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
@@ -318,6 +319,23 @@ def main():
         logger.warning(f"Cleanup failed: {e}")
 
     args = parse_args()
+
+    # NEW: Auto-scale concurrency based on hardware
+    try:
+        cpu_count = multiprocessing.cpu_count()
+        mem_gb = psutil.virtual_memory().total // (1024 ** 3)
+
+        recommended_domains = max(1, cpu_count // 2)
+        if args.parallel_domains > recommended_domains:
+            logger.warning("Reducing --parallel-domains from %d to %d based on CPU cores", args.parallel_domains, recommended_domains)
+            args.parallel_domains = recommended_domains
+
+        recommended_shots = max(1, mem_gb // 4)
+        if args.screenshot_workers > recommended_shots:
+            logger.warning("Reducing --screenshot-workers from %d to %d based on available RAM", args.screenshot_workers, recommended_shots)
+            args.screenshot_workers = recommended_shots
+    except Exception as e:
+        logger.warning("Auto-scaling failed (psutil?): %s", e)
     
     # Initialize database
     init_db()

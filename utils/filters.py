@@ -277,7 +277,8 @@ def filter_false_positives(domain, results, ignore_hash=False):
                 final.append(itm)
                 log_kept_endpoint(itm["url"])
                 update_hash_record(itm["url"], itm["body_hash"])
-                 # Skip forbidden pages (often false positives)
+
+                # Skip forbidden pages (often false positives)
                 if itm.get("status") == 403:
                     log_skipped_endpoint(itm["url"], reason="status-403")
                     continue

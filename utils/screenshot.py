@@ -8,6 +8,10 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+import threading  # NEW: for concurrency control
+
+MAX_CONCURRENT_CHROME = int(os.getenv("MAX_CONCURRENT_CHROME", "3"))  # NEW: configurable cap
+_chrome_semaphore = threading.BoundedSemaphore(MAX_CONCURRENT_CHROME)  # NEW
 
 def get_chrome_version():
     """Get the current Chrome browser version"""
@@ -49,6 +53,10 @@ def setup_chrome_driver():
 
 # ─────────── single screenshot ───────────
 def take_screenshot(url, output_path):
+    # NEW: throttle concurrent Chrome launches
+    if not _chrome_semaphore.acquire(timeout=60):
+        print("[!] Could not acquire Chrome semaphore (timeout)")
+        return
     driver = None
     try:
         # Setup Chrome options
@@ -126,6 +134,7 @@ def take_screenshot(url, output_path):
                 driver.quit()
             except:
                 pass
+        _chrome_semaphore.release()  # NEW: release semaphore
 
 # ─────────── parallel runner ───────────
 def take_screenshots_parallel(task_list, max_workers=3):
