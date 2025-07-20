@@ -7,6 +7,7 @@ import json
 import requests
 from functools import lru_cache
 from utils.tech_helpers import extract_tech_and_cves, aggregate_cves, severity_from_count
+import re
 
 HTML_REPORT_DIR = "results/html"
 
@@ -31,6 +32,16 @@ def _fetch_cve_summary(cve_id: str) -> str:
     except Exception:
         pass
     return ""
+
+def _slugify_name(value: str) -> str:
+    """Return a filesystem- and URL-safe slug for arbitrary strings (domains, tags, etc.)."""
+    # Remove URL scheme for domains
+    value = re.sub(r"^[a-zA-Z]+://", "", value)
+    # Replace non-alphanum (except dot, dash, underscore) with underscore
+    value = re.sub(r"[^0-9A-Za-z._-]+", "_", value)
+    # Collapse consecutive underscores
+    value = re.sub(r"_+", "_", value).strip("_")
+    return value or "item"
 
 def create_dashboard(all_domains_data):
     """
@@ -486,6 +497,7 @@ def create_dashboard(all_domains_data):
         cve_count    = aggregate_cves(findings)["total"]
         existing_count = len(findings) - new_count - changed_count
 
+        dom_slug = _slugify_name(domain)
         html += f"""
                         <tr data-domain="{domain}" data-new="{new_count}" data-changed="{changed_count}" data-existing="{existing_count}" data-secrets="{secret_count}" data-cves="{cve_count}">
                             <td><strong>{domain}</strong></td>
@@ -495,7 +507,7 @@ def create_dashboard(all_domains_data):
                             <td>{high_priority_count}</td>
                             <td>{secret_count}</td>
                             <td>{cve_count}</td>
-                            <td><a href="{domain}_tags.html">View</a></td>
+                            <td><a href="{dom_slug}_tags.html">View</a></td>
                         </tr>
         """
     
@@ -580,8 +592,12 @@ def export_tag_based_reports(domain, findings, output_dir=HTML_REPORT_DIR):
         tag = f.get("ai_tag", "Other")
         grouped[tag].append(f)
 
+    dom_slug = _slugify_name(domain)
     # Build domain tag index
-    tag_index_file = os.path.join(output_dir, f"{domain}_tags.html")
+    tag_index_file = os.path.join(output_dir, f"{dom_slug}_tags.html")
+
+    # Ensure parent directories exist for nested domain paths (e.g., "https://...")
+    os.makedirs(os.path.dirname(tag_index_file), exist_ok=True)
 
     # Enhanced HTML with better styling
     html = f"""
@@ -727,7 +743,7 @@ def export_tag_based_reports(domain, findings, output_dir=HTML_REPORT_DIR):
 
         # Create tag card
         tag_slug = slugify_tag(tag)
-        subpage_name = f"{domain}_tag_{tag_slug}.html"
+        subpage_name = f"{dom_slug}_tag_{tag_slug}.html"
 
         html += f"""
                 <a href="{subpage_name}">
@@ -754,7 +770,7 @@ def export_tag_based_reports(domain, findings, output_dir=HTML_REPORT_DIR):
         """
 
         # Generate the sub-page
-        make_enhanced_subpage_for_tag(domain, tag, items, subpage_name, output_dir)
+        make_enhanced_subpage_for_tag(domain, tag, items, subpage_name, output_dir, dom_slug)
 
     html += f"""
             </div>
@@ -787,7 +803,7 @@ def export_tag_based_reports(domain, findings, output_dir=HTML_REPORT_DIR):
     print(f"[+] Tag index for '{domain}' saved to: {tag_index_file}")
 
 
-def make_enhanced_subpage_for_tag(domain, tag, items, subpage_name, output_dir):
+def make_enhanced_subpage_for_tag(domain, tag, items, subpage_name, output_dir, dom_slug):
     """
     Creates an enhanced subpage with better styling and status indicators
     """
@@ -797,6 +813,9 @@ def make_enhanced_subpage_for_tag(domain, tag, items, subpage_name, output_dir):
         return  # nothing to render
 
     subpage_path = os.path.join(output_dir, subpage_name)
+
+    # Create any nested directories required by sanitised domain names with slashes
+    os.makedirs(os.path.dirname(subpage_path), exist_ok=True)
 
     html = f"""
     <!DOCTYPE html>
@@ -917,7 +936,7 @@ def make_enhanced_subpage_for_tag(domain, tag, items, subpage_name, output_dir):
                 <h1>{tag}</h1>
                 <div class="breadcrumb">
                     <a href="dashboard.html">Dashboard</a> / 
-                    <a href="{domain}_tags.html">{domain}</a> / 
+                    <a href="{dom_slug}_tags.html">{domain}</a> / 
                     {tag}
                 </div>
             </div>
@@ -1101,7 +1120,7 @@ def make_enhanced_subpage_for_tag(domain, tag, items, subpage_name, output_dir):
     html += f"""
             </div>
             <div style="text-align: center; color: #6b7280; margin-top: 2rem;">
-                <a href="{domain}_tags.html" style="color: #6366f1;">← Back to {domain} overview</a>
+                <a href="{dom_slug}_tags.html" style="color: #6366f1;">← Back to {domain} overview</a>
             </div>
         </div>
     </body>
