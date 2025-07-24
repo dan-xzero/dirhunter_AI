@@ -23,22 +23,37 @@ def _ffuf_supports_resume():
     return _FFUF_SUPPORTS_RESUME
 
 
-def smart_resolve_scheme(domain):
-    if domain.startswith("http://") or domain.startswith("https://"):
-        return domain.rstrip("/")
+def smart_resolve_scheme(domain: str) -> str:
+    """Return a fully-qualified base URL (no trailing slash) for the given domain.
 
+    1. Accepts inputs with or without scheme.
+    2. Removes any *trailing* slashes to avoid the dreaded ``//`` duplication when
+       we later append paths (e.g. ``https://example.com`` instead of
+       ``https://example.com/``).
+    3. Prefers HTTPS but gracefully falls back to HTTP when the HEAD request
+       fails.
+    """
+
+    # 1️⃣  Normalise – strip *all* trailing slashes first so we never propagate them
+    domain = domain.rstrip("/")
+
+    # 2️⃣  If the caller already provided a scheme, we are done after normalising.
+    if domain.startswith("http://") or domain.startswith("https://"):
+        return domain  # already sans trailing slash
+
+    # 3️⃣  Otherwise, try HTTPS then HTTP
     https_url = f"https://{domain}"
     try:
         resp = requests.head(https_url, timeout=5, allow_redirects=True)
         if resp.status_code < 500:
             print(f"[+] Using HTTPS → {https_url}")
-            return https_url
+            return https_url  # Already has no trailing slash
     except Exception:
         print(f"[!] HTTPS failed, falling back to HTTP")
 
     http_url = f"http://{domain}"
     print(f"[+] Using HTTP → {http_url}")
-    return http_url.rstrip("/")
+    return http_url  # No trailing slash
 
 
 def run_ffuf(domain,
@@ -60,13 +75,16 @@ def run_ffuf(domain,
         p = Path(wordlist)
         if p.exists():
             sanitized = p.with_suffix(p.suffix + ".noslash")
-            if not sanitized.exists() or sanitized.stat().st_mtime < p.stat().st_mtime:
-                with p.open("r", encoding="utf-8", errors="ignore") as src, sanitized.open("w", encoding="utf-8") as dst:
-                    for line in src:
-                        ln = line.rstrip("\n\r")
-                        if ln.startswith('/') and not ln.startswith('//'):
-                            ln = ln[1:]
-                        dst.write(ln + "\n")
+            # Always regenerate to pick up any sanitation rule changes
+            with p.open("r", encoding="utf-8", errors="ignore") as src, sanitized.open("w", encoding="utf-8") as dst:
+                for line in src:
+                    ln = line.rstrip("\n\r")
+                    import re as _re  # local import to avoid top-level dependency
+                    if ln.startswith('/') and not ln.startswith('//'):
+                        ln = ln[1:]
+                    # Collapse repeated slashes anywhere else in the path (e.g., "admin//upload")
+                    ln = _re.sub(r'/+', '/', ln)
+                    dst.write(ln + "\n")
             sanitized_wordlist = str(sanitized)
     except Exception:
         # Fallback to original list on any error
@@ -89,7 +107,7 @@ def run_ffuf(domain,
         "-t",  str(threads),
         "-o",  output_file,
         "-of", "json",
-        "-fc", "404",  # Removed 429 from filter to track rate limits
+        "-fc", "404","403",  # Removed 429 from filter to track rate limits
         "-v",
         # "-x", "http://127.0.0.1:8080",
         "-H", "User-agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36-FUZZ"

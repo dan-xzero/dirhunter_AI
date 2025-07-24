@@ -25,10 +25,33 @@ except Exception:  # pragma: no cover
 # ─────────── CONFIG ───────────
 SOFT_404_PHRASES = [
     "oops, you must be lost", "page not found", "go to homepage",
-    "404 error", "not exist", "return to homepage"
+    "404 error", "not exist", "return to homepage",
+    # E-commerce specific
+    "product not found", "item not found", "shop not found",
+    "store not found", "collection not found", "category not found",
+    # Shopify specific
+    "continue shopping", "search our store", "popular collections",
+    "404 not found", "the page you requested does not exist",
+    # General CMS
+    "nothing found", "no results found", "content not found",
+    "article not found", "post not found", "sorry, we couldn't find",
+    "the page you are looking for", "page cannot be found",
+    "page does not exist", "page is not available",
+    # Common redirect messages
+    "you will be redirected", "redirecting to", "please wait"
 ]
 EXCLUDE_PATTERNS = ["/healthz", "/status"]
 DOMAIN_OVERRIDES = {}
+
+# Download detection config
+DOWNLOAD_SIZE_THRESHOLD = 1048576  # 1MB instead of 250KB
+DOWNLOAD_CONTENT_TYPES = [
+    "application/octet-stream", "application/zip", "application/pdf",
+    "application/x-tar", "application/x-gzip", "application/x-bzip2",
+    "application/java-archive", "application/x-rar-compressed",
+    "image/", "video/", "audio/", "font/", "application/vnd",
+    "application/x-shockwave-flash", "application/x-msdownload"
+]
 
 # ─────────── LOGGING SETUP ───────────
 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
@@ -39,6 +62,7 @@ KEPT_FILE = os.path.join(LOG_DIR, f"kept_{timestamp}.txt")
 SUMMARY_FILE = os.path.join(LOG_DIR, f"summary_{timestamp}.txt")
 
 curl_cache = {}  # url → (is_soft404, sha1_hash, fuzzy_hash, final_status, is_downloadable)
+catch_all_domains = {}  # domain → (is_catch_all, common_hash, common_size)
 init_db()
 
 # ─────────── LOG HELPERS ───────────
@@ -61,9 +85,74 @@ def log_summary(domain, raw_count, after_heuristic, after_cluster, new_count, ch
         f.write(f"  - Changed findings: {changed_count}\n")
         f.write(f"  - Existing findings: {existing_count}\n\n")
 
+# ─────────── CATCH-ALL DETECTION ───────────
+def detect_catch_all_page(domain: str) -> tuple:
+    """Pre-scan to detect if domain has a catch-all page for 404s"""
+    import random
+    import string
+    
+    # Generate 3 random non-existent paths
+    random_paths = []
+    for _ in range(3):
+        random_str = ''.join(random.choices(string.ascii_lowercase + string.digits, k=12))
+        random_paths.append(f"/{random_str}")
+    
+    responses = []
+    for path in random_paths:
+        url = f"{domain.rstrip('/')}{path}"
+        try:
+            import warnings
+            from urllib3.exceptions import InsecureRequestWarning
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', InsecureRequestWarning)
+                resp = requests.get(url, headers=HEADERS, timeout=10, allow_redirects=True, verify=False)
+            
+            # Only check first 50KB for performance
+            content = resp.content[:51200]
+            content_hash = hashlib.sha1(content).hexdigest()
+            responses.append({
+                'status': resp.status_code,
+                'size': len(resp.content),
+                'hash': content_hash,
+                'url': resp.url
+            })
+        except Exception as e:
+            import logging
+            # Check if it's a DNS resolution error
+            error_str = str(e).lower()
+            if 'failed to resolve' in error_str or 'nodename nor servname provided' in error_str:
+                logging.warning(f"[catch-all] DNS resolution failed for {domain}")
+                # Return early - domain doesn't exist
+                return (False, None, None)
+            logging.debug(f"[catch-all] Error checking {url}: {e}")
+            continue
+    
+    if len(responses) < 2:
+        return (False, None, None)
+    
+    # Check if all responses have same hash or size
+    hashes = [r['hash'] for r in responses]
+    sizes = [r['size'] for r in responses]
+    
+    # If all hashes are identical, it's a catch-all
+    if len(set(hashes)) == 1:
+        return (True, hashes[0], sizes[0])
+    
+    # If all sizes are identical and > 10KB, likely catch-all
+    if len(set(sizes)) == 1 and sizes[0] > 10240:
+        return (True, None, sizes[0])
+    
+    return (False, None, None)
+
 # ─────────── CURL FETCHER ───────────
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (DirHunter AI)"
+    # Use a common browser UA to avoid WAF blocks and add branding in a custom header
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0 Safari/537.36"
+    ),
+    "X-Scanner": "DirHunter-AI",
 }
 
 
@@ -78,16 +167,44 @@ def curl_fetch_hash(url: str):
         return val
 
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=10, allow_redirects=True)
+        import warnings
+        from urllib3.exceptions import InsecureRequestWarning
+        # Ignore TLS cert errors so we can still inspect bodies with bad/hostname-mismatch certs
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', InsecureRequestWarning)
+            resp = requests.get(url, headers=HEADERS, timeout=15, allow_redirects=True, verify=False)
         final_status = resp.status_code
 
-        # Read at most 2 MB to avoid huge memory – larger bodies will be truncated for hashing
-        max_bytes = 2 * 1024 * 1024
-        body_bytes = resp.content[:max_bytes]
+        # Memory optimization: For HTML, only read what we need
+        ctype = resp.headers.get("Content-Type", "").lower()
+        is_html = "html" in ctype or ctype.startswith("text/")
+        
+        if is_html and len(resp.content) > 51200:  # 50KB
+            # For large HTML, only read first 50KB for analysis
+            body_bytes = resp.content[:51200]
+            full_size = len(resp.content)
+        else:
+            body_bytes = resp.content
+            full_size = len(body_bytes)
 
-        # Soft-404 heuristic
-        body_sample = body_bytes[:10000].decode("utf-8", errors="ignore").lower()
-        is_soft404 = final_status in (404, 410) or any(kw in body_sample for kw in SOFT_404_PHRASES)
+        # Soft-404 heuristic – check more content for large pages
+        check_size = min(51200, len(body_bytes))  # Check up to 50KB
+        body_sample = body_bytes[:check_size].decode("utf-8", errors="ignore").lower()
+        is_soft404 = final_status in (404, 410, 403) or any(kw in body_sample for kw in SOFT_404_PHRASES)
+
+        # Extra rule: many CMSes/routers issue a 301/302 to the site root ("/")
+        # for unknown paths and then serve the homepage. This still yields a
+        # 200 but is effectively a soft-404.  Treat that as such when:
+        #   • the original path is non-empty (i.e. not just "/")
+        #   • the final resolved path is the root ("/" or "")
+        try:
+            orig_path = urllib.parse.urlparse(url).path.rstrip("/")
+            final_path = urllib.parse.urlparse(resp.url).path.rstrip("/")
+            if orig_path and not final_path:
+                is_soft404 = True
+        except Exception:
+            # Parsing issues shouldn’t break the pipeline – ignore.
+            pass
 
         # Hashes
         body_hash = hashlib.sha1(body_bytes).hexdigest() if body_bytes else None
@@ -95,13 +212,30 @@ def curl_fetch_hash(url: str):
             fuzzy_hash = ssdeep.hash(body_bytes.decode('latin-1', errors='ignore')) if body_bytes else ""
         except Exception:
             fuzzy_hash = ""
+        
+        # Check against known catch-all pages
+        domain = urllib.parse.urlparse(url).netloc
+        if domain in catch_all_domains:
+            is_catch_all, catch_all_hash, catch_all_size = catch_all_domains[domain]
+            if is_catch_all and (body_hash == catch_all_hash or full_size == catch_all_size):
+                is_soft404 = True
 
-        # Determine downloadability
-        ctype = resp.headers.get("Content-Type", "").lower()
+        # Determine downloadability - fixed logic
+        import logging
+        # ctype already defined above
+        is_json = ctype and "json" in ctype
+        
+        # Check if content type indicates download
+        is_download_type = any(ct in ctype for ct in DOWNLOAD_CONTENT_TYPES)
+        
+        # Never treat HTML as download, regardless of size
         is_download = (
-            (ctype and not ctype.startswith("text") and "html" not in ctype) or
-            len(body_bytes) > 250000  # >250 KB
+            is_download_type or
+            (ctype and not ctype.startswith("text") and "html" not in ctype and not is_json and full_size > DOWNLOAD_SIZE_THRESHOLD)
         )
+
+        if is_download:
+            logging.info("[download] Detected potential downloadable: %s (ctype=%s, size=%d)", url, ctype, full_size)
 
         download_meta = None
         if is_download:
@@ -144,8 +278,11 @@ def curl_fetch_hash(url: str):
         vt_result = None
 
         val = (is_soft404, body_hash, fuzzy_hash, final_status, is_download, download_meta, vt_result, tech)
-    except Exception:
-        val = (False, None, None, None, False, None, None, None)
+    except Exception as e:
+        import logging
+        logging.warning("[curl_fetch] Error fetching %s: %s", url, e)
+        # Mark network/DNS errors as soft-404 so downstream logic filters them out
+        val = (True, None, None, None, False, None, None, None)
 
     # Ensure 8-tuple length and cache
     if len(val) < 8:
@@ -163,13 +300,30 @@ def parallel_curl_fetch(urls, max_workers=10):
             try:
                 result = future.result()
                 results[url] = result
-            except Exception:
-                results[url] = (False, None, None, None, False)
+            except Exception as e:
+                import logging
+                logging.warning("[parallel_curl] Error processing %s: %s", url, e)
+                results[url] = (False, None, None, None, False, None, None, None)
     return results
 
 # ─────────── MAIN FILTER ───────────
-def filter_false_positives(domain, results, ignore_hash=False):
-    print(f"[~] Filtering for {domain} – raw: {len(results)}")
+def filter_false_positives(domain, results, ignore_hash=False, fast=False):
+    """Filter out obvious false positives.
+
+    When *fast* is True a lightweight mode is used which **skips** the costly
+    cURL/hash/content-inspection step. This is useful for quick scans where you
+    only care about basic heuristics and drastically improves performance when
+    working with huge wordlists or many domains.
+    """
+
+    print(f"[~] Filtering for {domain} – raw: {len(results)} (fast={fast})")
+    
+    # Pre-scan for catch-all pages
+    if not fast and domain not in catch_all_domains:
+        is_catch_all, catch_all_hash, catch_all_size = detect_catch_all_page(domain)
+        catch_all_domains[domain] = (is_catch_all, catch_all_hash, catch_all_size)
+        if is_catch_all:
+            print(f"[!] Detected catch-all page for {domain} (size={catch_all_size})")
 
     # Step 1: heuristic filtering (length + pattern)
     freq = {}
@@ -187,9 +341,19 @@ def filter_false_positives(domain, results, ignore_hash=False):
         if any(pat in url for pat in EXCLUDE_PATTERNS):
             log_skipped_endpoint(r["url"], reason="pattern-skip")
             continue
+        
+        # Skip 403 Forbidden responses early
+        if status == 403:
+            log_skipped_endpoint(r["url"], reason="status-403")
+            continue
+
+        # Skip 0-byte responses (likely redirects with no body or dead endpoints)
+        if length == 0:
+            log_skipped_endpoint(r["url"], reason="size-0")
+            continue
 
         kw_hit = any(k in url for k in kw_set)
-        short_rd = status in (301, 302) and length == 0 and "." not in r["path"].split("/")[-1]
+        short_rd = status in (301, 302) and "." not in r["path"].split("/")[-1]
 
         keep = status in (200, 301, 302) and (length != common_len or kw_hit or short_rd)
         if keep:
@@ -199,13 +363,42 @@ def filter_false_positives(domain, results, ignore_hash=False):
 
     print(f"[~] After heuristic pass: {len(stage1)} kept / {len(results)-len(stage1)} skipped")
 
-    # Step 2: curl + hash + cluster
-    urls_to_check = [r["url"] for r in stage1]
-    curl_results = parallel_curl_fetch(urls_to_check, max_workers=10)
+    # Step 2: Deep inspection (skip when fast=True)
+    curl_results = {}
+    if not fast:
+        urls_to_check = [r["url"] for r in stage1]
+        curl_results = parallel_curl_fetch(urls_to_check, max_workers=10)
 
+    # Count hash frequencies for soft-404 detection
+    hash_freq = defaultdict(int)
+    if not fast:
+        for url, result in curl_results.items():
+            if result[1]:  # body_hash
+                hash_freq[result[1]] += 1
+    
+    # If a hash appears in >30% of results, it's likely a soft-404
+    soft_404_threshold = max(3, len(stage1) * 0.3)
+    common_hashes = {h for h, count in hash_freq.items() if count >= soft_404_threshold}
+    
     clusters = defaultdict(list)
     for r in stage1:
-        is_soft, body_hash, fuzzy_hash, final_status, is_downloadable, download_meta, vt_result, tech = curl_results.get(r["url"], (False, None, None, None, False, None, None, None))
+        if fast:
+            # Minimal placeholders to keep downstream code happy
+            is_soft = False
+            body_hash = None
+            fuzzy_hash = ""
+            final_status = r.get("status")
+            is_downloadable = False
+            download_meta = None
+            vt_result = None
+            tech = None
+        else:
+            is_soft, body_hash, fuzzy_hash, final_status, is_downloadable, download_meta, vt_result, tech = curl_results.get(r["url"], (False, None, None, None, False, None, None, None))
+            
+            # Mark as soft-404 if hash is too common
+            if body_hash in common_hashes:
+                is_soft = True
+                
         r["vt"] = vt_result
         r["download_meta"] = download_meta
         r["tech"] = tech
@@ -230,7 +423,18 @@ def filter_false_positives(domain, results, ignore_hash=False):
 
     for key, items in clusters.items():
         probe = items[0]
-        is_soft, _, _, _, _, _, _, _ = curl_results.get(probe["url"], (False, None, None, None, False, None, None, None))
+        if fast:
+            # Minimal placeholders to keep downstream code happy
+            is_soft = False
+            body_hash = None
+            fuzzy_hash = ""
+            final_status = probe.get("status")
+            is_downloadable = False
+            download_meta = None
+            vt_result = None
+            tech = None
+        else:
+            is_soft, body_hash, fuzzy_hash, final_status, is_downloadable, download_meta, vt_result, tech = curl_results.get(probe["url"], (False, None, None, None, False, None, None, None))
 
         if is_soft:
             for itm in items:
@@ -278,11 +482,6 @@ def filter_false_positives(domain, results, ignore_hash=False):
                 log_kept_endpoint(itm["url"])
                 update_hash_record(itm["url"], itm["body_hash"])
 
-                # Skip forbidden pages (often false positives)
-                if itm.get("status") == 403:
-                    log_skipped_endpoint(itm["url"], reason="status-403")
-                    continue
-
     print(f"[+] Final count for {domain}: {len(final)} (new: {new_count}, changed: {changed_count}, existing: {existing_count})")
     log_summary(domain, raw_count=len(results), after_heuristic=len(stage1), 
                 after_cluster=len(final), new_count=new_count, 
@@ -321,7 +520,17 @@ def inspect_download(body_bytes: bytes, content_type: str):
     meta["content_type"] = content_type
 
     if size > INSPECT_SIZE_LIMIT:
-        meta["note"] = "Skipped (too large)"
+        # Scan full large file for secrets (may be slow)
+        try:
+            from utils.secret_scan import scan_secrets_bytes
+            th_res = scan_secrets_bytes(body_bytes)
+            if th_res:
+                meta["th_secrets"] = th_res
+                logging.info("[secrets] TruffleHog found %d secrets", len(th_res))
+        except Exception:
+            pass
+
+        meta["note"] = f"Large file – scanned entire {size//1024//1024} MB file"
         return meta
 
     # ZIP file
@@ -342,17 +551,29 @@ def inspect_download(body_bytes: bytes, content_type: str):
     else:
         try:
             text = body_bytes.decode("utf-8", errors="ignore")
+
+            # 1️⃣  Simple regex-based secret detection (quick)
             found = []
             for pat in SECRET_PATTERNS:
                 if pat.search(text):
                     found.append(pat.pattern)
             if found:
                 meta["potential_secrets"] = list(set(found))
-            # Check for package.json dependencies
+                logging.info("[secrets] Regex secrets hit %d patterns", len(found))
+
+            # 2️⃣  TruffleHog scan (if available) – richer discovery
+            try:
+                from utils.secret_scan import scan_secrets_bytes
+                th_res = scan_secrets_bytes(body_bytes)  # scan full content
+                if th_res:
+                    meta["th_secrets"] = th_res
+                    logging.info("[secrets] TruffleHog found %d secrets", len(th_res))
+            except Exception:
+                pass
+
+            # 3️⃣  Node package CVE check if package.json detected
             if '"dependencies"' in text and text.strip().startswith('{'):
                 try:
-                    pkg_json = json.loads(text)
-                    deps = pkg_json.get('dependencies', {})
                     from utils.cve import check_node_manifest
                     cve_info = check_node_manifest(text)
                     if cve_info and cve_info.get("total_vulns"):

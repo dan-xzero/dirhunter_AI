@@ -54,7 +54,8 @@ def send_consolidated_slack_alert(all_results, webhook_url):
             category_counts[category] += 1
             
             # Secrets via trufflehog
-            secrets = finding.get('download_meta', {}).get('th_secrets', []) if finding.get('download_meta') else []
+            dm = finding.get('download_meta') or {}
+            secrets = (dm.get('th_secrets', []) or []) + (dm.get('potential_secrets', []) or [])
             if secrets:
                 domain_secrets += len(secrets)
                 secret_urls.append(finding['url'])

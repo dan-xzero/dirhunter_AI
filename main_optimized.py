@@ -1,14 +1,21 @@
 import os, sys, traceback, logging, argparse
+
+# Suppress MallocStackLogging warnings on macOS
+os.environ['MallocStackLogging'] = '0'
+
 from dotenv import load_dotenv
 from utils.scanner import run_ffuf, retry_rate_limited_paths
 from utils.filters import filter_false_positives
-from utils.screenshot import take_screenshots_parallel
+from utils.screenshot import take_screenshots_parallel, filter_screenshot_tasks
 from utils.ai_analyzer import classify_screenshot_with_gpt, batch_classify_screenshots
 from utils.slack_alert import send_consolidated_slack_alert, send_rate_limit_alert, send_critical_alert
 from utils.reporter import export_tag_based_reports, create_dashboard
+from utils.enhanced_reporter import create_enhanced_dashboard
+from utils.enhanced_slack import send_enhanced_slack_alert
 from utils.db_handler import reset_db, init_db, batch_track_findings
 from utils.tag_validator import validate_tagged_entry
 from utils.performance import PerformanceTracker
+from utils.dns_check import pre_scan_dns_check
 from config import EXTENSIONS, THREADS, SCREENSHOT_DIR, RAW_RESULTS_DIR
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
@@ -51,6 +58,7 @@ def parse_args():
     parser.add_argument("--parallel-domains", type=int, default=5, help="Number of domains to scan in parallel (default: 5)")
     parser.add_argument("--no-critical-alerts", action="store_true", help="Disable real-time critical alerts")
     parser.add_argument("--performance-report", action="store_true", help="Generate performance metrics report")
+    parser.add_argument("--fast-filter", action="store_true", help="Skip deep curl/hash checks to speed up filtering")
     return parser.parse_args()
 
 # ──────────── HELPERS ────────────
@@ -100,7 +108,7 @@ def check_and_send_critical_alerts(domain, findings, no_critical_alerts=False):
         send_critical_alert(domain, critical_findings, WEBHOOK_URL)
 
 # ──────────── OPTIMIZED DOMAIN PROCESSOR ────────────
-def process_domain_optimized(domain, wordlist, ignore_hash, screenshot_workers, no_critical_alerts=False):
+def process_domain_optimized(domain, wordlist, ignore_hash, screenshot_workers, no_critical_alerts=False, fast_filter=False):
     """Optimized domain processing"""
     start_time = time.time()
     perf_metrics = {}
@@ -130,7 +138,7 @@ def process_domain_optimized(domain, wordlist, ignore_hash, screenshot_workers, 
 
         # Filter with performance tracking
         filter_start = time.time()
-        filtered = filter_false_positives(domain, raw, ignore_hash=ignore_hash)
+        filtered = filter_false_positives(domain, raw, ignore_hash=ignore_hash, fast=fast_filter)
         filter_duration = time.time() - filter_start
         perf_metrics['filter_time'] = filter_duration
         
@@ -139,8 +147,13 @@ def process_domain_optimized(domain, wordlist, ignore_hash, screenshot_workers, 
             log_skipped(domain)
             return None, perf_metrics
 
+        # Pre-filter to reduce screenshot workload
+        unique_findings = filter_screenshot_tasks(filtered)
+        
         # Prepare screenshot tasks – skip direct downloads
         screenshot_tasks = []
+        screenshot_map = {}  # url -> screenshot path for duplicates
+        
         for entry in filtered:
             entry["url"] = force_trailing_slash_if_needed(entry["url"], entry["status"])
 
@@ -151,17 +164,30 @@ def process_domain_optimized(domain, wordlist, ignore_hash, screenshot_workers, 
                 entry.setdefault("ai_tag", "Downloadable File")
                 continue
 
-            shot_path = os.path.join(SCREENSHOT_DIR, domain, safe_filename(entry["path"]) + ".png")
-            entry["screenshot"] = shot_path
-            screenshot_tasks.append({
-                "url": entry["url"],
-                "output_path": shot_path,
-                "screenshot_path": shot_path
-            })
+            # Check if this is a duplicate
+            if entry.get('screenshot_duplicate_of'):
+                # Will use the screenshot from the representative
+                continue
+                
+            # Only create screenshot task if this is a unique finding
+            if entry in unique_findings:
+                shot_path = os.path.join(SCREENSHOT_DIR, domain, safe_filename(entry["path"]) + ".png")
+                entry["screenshot"] = shot_path
+                screenshot_map[entry["url"]] = shot_path
+                screenshot_tasks.append({
+                    "url": entry["url"],
+                    "output_path": shot_path,
+                    "screenshot_path": shot_path
+                })
 
         # Take screenshots in parallel
         screenshot_start = time.time()
         take_screenshots_parallel(screenshot_tasks, max_workers=screenshot_workers)
+        
+        # Assign screenshots to duplicates
+        for entry in filtered:
+            if entry.get('screenshot_duplicate_of') and entry['screenshot_duplicate_of'] in screenshot_map:
+                entry["screenshot"] = screenshot_map[entry['screenshot_duplicate_of']]
         screenshot_duration = time.time() - screenshot_start
         perf_metrics['screenshot_time'] = screenshot_duration
 
@@ -247,7 +273,8 @@ def process_domains_parallel(domains_with_wordlists, args):
                 wordlist,
                 args.ignore_hash,
                 args.screenshot_workers,
-                args.no_critical_alerts
+                args.no_critical_alerts,
+                args.fast_filter
             )
             future_to_domain[future] = domain
         
@@ -374,6 +401,20 @@ def main():
         for domain in nonprod_domains:
             domains_with_wordlists.append((domain, "wordlists/wordlist_nonprod.txt"))
 
+    # DNS validation before processing
+    if domains_with_wordlists:
+        # Extract unique domains for DNS check
+        unique_domains = list(set(domain for domain, _ in domains_with_wordlists))
+        valid_domains = pre_scan_dns_check(unique_domains)
+        
+        # Filter domains_with_wordlists to only include valid domains
+        domains_with_wordlists = [(domain, wordlist) for domain, wordlist in domains_with_wordlists 
+                                  if domain in valid_domains]
+        
+        if not domains_with_wordlists:
+            logger.error("No valid domains to scan after DNS validation.")
+            sys.exit(1)
+    
     # Process domains in parallel
     start_time = time.time()
     all_results, perf_data = process_domains_parallel(domains_with_wordlists, args)
@@ -390,6 +431,13 @@ def main():
     if all_results:
         dashboard_path = create_dashboard(all_results)
         logger.info(f"Dashboard created: {dashboard_path}")
+        
+        # Create enhanced dashboard with visualizations
+        try:
+            enhanced_dashboard_path = create_enhanced_dashboard(all_results)
+            logger.info(f"Enhanced dashboard created: {enhanced_dashboard_path}")
+        except Exception as e:
+            logger.warning(f"Enhanced dashboard creation failed: {e}")
         
         # Update run history stats for timeline
         try:
@@ -415,7 +463,14 @@ def main():
                     non_critical_results[domain] = non_critical
             
             if non_critical_results:
+                # Send standard alert
                 send_consolidated_slack_alert(non_critical_results, WEBHOOK_URL)
+                
+                # Send enhanced alert with better visualization
+                try:
+                    send_enhanced_slack_alert(WEBHOOK_URL, all_results)
+                except Exception as e:
+                    logger.warning(f"Enhanced Slack alert failed: {e}")
         else:
             logger.warning("WEBHOOK_URL not set. Skipping Slack alert.")
     else:

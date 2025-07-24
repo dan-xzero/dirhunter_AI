@@ -10,6 +10,7 @@ missing.  A concise console message explains how to enable the feature.
 import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import defaultdict
 
 # ─── Optional Selenium import (graceful degradation) ───────────────────────────
 try:
@@ -252,6 +253,41 @@ def take_screenshot(url, output_path):
             except:
                 pass
         _chrome_semaphore.release()  # NEW: release semaphore
+
+# ─────────── pre-filtering ───────────
+def filter_screenshot_tasks(findings):
+    """Pre-filter findings to reduce screenshot workload"""
+    if not findings:
+        return []
+    
+    # Group by hash to avoid screenshotting identical pages
+    hash_groups = defaultdict(list)
+    for f in findings:
+        if f.get('body_hash'):
+            hash_groups[f['body_hash']].append(f)
+        else:
+            # No hash, include it
+            hash_groups[f['url']].append(f)
+    
+    # Take only one screenshot per unique hash
+    filtered = []
+    for hash_val, group in hash_groups.items():
+        # Prefer findings with keywords in URL
+        priority_keywords = ['admin', 'config', 'api', 'login', 'dashboard', 'upload']
+        sorted_group = sorted(group, 
+                            key=lambda x: any(kw in x['url'].lower() for kw in priority_keywords),
+                            reverse=True)
+        
+        # Take the first (highest priority) finding from each hash group
+        representative = sorted_group[0]
+        filtered.append(representative)
+        
+        # Mark others as having same content
+        for other in sorted_group[1:]:
+            other['screenshot_duplicate_of'] = representative['url']
+    
+    print(f"[i] Screenshot filtering: {len(findings)} findings → {len(filtered)} unique pages")
+    return filtered
 
 # ─────────── parallel runner ───────────
 def take_screenshots_parallel(task_list, max_workers=3):

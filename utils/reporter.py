@@ -73,7 +73,8 @@ def create_dashboard(all_domains_data):
             global_category_counts[category] += 1
 
             # Count secrets at finding level
-            secret_cnt = len(finding.get('download_meta', {}).get('th_secrets', [])) if finding.get('download_meta') else 0
+            dm = finding.get('download_meta') or {}
+            secret_cnt = len(dm.get('th_secrets', [])) + len(dm.get('potential_secrets', []))
             global_secret_count += secret_cnt
             
             # Collect high priority findings
@@ -493,7 +494,8 @@ def create_dashboard(all_domains_data):
         high_priority_count = sum(1 for f in findings if get_category_priority(f.get('ai_tag', 'Other')) >= 7)
         
         # Secrets count per domain
-        secret_count = sum(len(f.get('download_meta', {}).get('th_secrets', [])) for f in findings if f and f.get('download_meta'))
+        secret_count = sum((len((f.get('download_meta') or {}).get('th_secrets', [])) +
+                           len((f.get('download_meta') or {}).get('potential_secrets', []))) for f in findings if f and f.get('download_meta'))
         cve_count    = aggregate_cves(findings)["total"]
         existing_count = len(findings) - new_count - changed_count
 
@@ -981,10 +983,6 @@ def make_enhanced_subpage_for_tag(domain, tag, items, subpage_name, output_dir, 
                             </div>
         
                             <div class="metadata-item">
-                                <strong>VirusTotal:</strong> {f.get('vt_status', 'N/A')}
-                            </div>
-        
-                            <div class="metadata-item">
                                 <strong>First Seen:</strong> {f.get('first_seen','')}
                             </div>
             """
@@ -1011,15 +1009,7 @@ def make_enhanced_subpage_for_tag(domain, tag, items, subpage_name, output_dir, 
         """
 
         # ---- security & technology badges ----
-        vt = f.get('vt') or {}
-        vt_badge = ""
-        if vt:
-            pos = vt.get('positives', 0)
-            total = vt.get('total', 0)
-            color = '#dc2626' if pos else '#059669'
-            vt_badge = f"<span style='background:{color};color:#fff;padding:2px 6px;border-radius:4px;font-size:0.75rem' title='VirusTotal positives/total'>VT {pos}/{total}</span>"
-
-        # Download meta for secrets
+        # Download meta for secrets and file info
         download_meta = f.get('download_meta') or {}
 
         # Technology & CVEs
@@ -1063,15 +1053,136 @@ def make_enhanced_subpage_for_tag(domain, tag, items, subpage_name, output_dir, 
             cve_badge = f"<span style='background:{color};color:#fff;padding:2px 6px;border-radius:4px;font-size:0.75rem' title='CVE severity {sev}'>{sev} CVE {total_cve_cnt}</span>"
 
         # Secrets badge
-        secret_cnt = len(download_meta.get('th_secrets', []))
+        secret_cnt = len(download_meta.get('th_secrets', [])) + len(download_meta.get('potential_secrets', []))
         secret_badge = ""
         if secret_cnt:
-            secret_badge = f"<span style='background:#be123c;color:#fff;padding:2px 6px;border-radius:4px;font-size:0.75rem' title='Secrets detected by TruffleHog'>SECRETS {secret_cnt}</span>"
+            secret_badge = f"<span style='background:#be123c;color:#fff;padding:2px 6px;border-radius:4px;font-size:0.75rem' title='Potential secrets detected'>SECRETS {secret_cnt}</span>"
 
-        if vt_badge or cve_badge or secret_badge or tech_badge_html:
+        # Build enhanced secret details HTML with categorization
+        secret_details_html = ""
+        if secret_cnt:
+            from utils.enhanced_reporter import categorize_secret, SECRET_TYPES
+            
+            secret_by_type = defaultdict(list)
+            
+            # Categorize TruffleHog secrets
+            for s in download_meta.get('th_secrets', []):
+                val = s.get('raw') or s.get('redacted') or '***'
+                reason = s.get('reason', '')
+                secret_info = categorize_secret(val, reason)
+                
+                # Redact sensitive parts
+                if len(val) > 20:
+                    redacted = val[:8] + '...' + val[-8:]
+                else:
+                    redacted = val[:4] + '***'
+                    
+                secret_by_type[secret_info['type']].append({
+                    'value': redacted,
+                    'reason': reason,
+                    'risk': secret_info['risk'],
+                    'icon': secret_info['icon']
+                })
+            
+            # Add potential secrets
+            for pat in download_meta.get('potential_secrets', []):
+                secret_info = categorize_secret(pat, '')
+                if len(pat) > 20:
+                    redacted = pat[:8] + '...' + pat[-8:]
+                else:
+                    redacted = pat[:4] + '***'
+                    
+                secret_by_type[secret_info['type']].append({
+                    'value': redacted,
+                    'reason': 'Pattern match',
+                    'risk': secret_info['risk'],
+                    'icon': secret_info['icon']
+                })
+            
+            if secret_by_type:
+                secret_details_html = """
+                            <details style='margin-top:0.5rem;font-size:0.8rem'>
+                                <summary style='cursor:pointer;'>🔐 Secret Analysis</summary>
+                                <div style='margin-top:0.5rem;padding:0.5rem;background:#fef2f2;border-radius:4px'>
+                """
+                
+                # Sort by risk level
+                risk_order = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
+                sorted_types = sorted(secret_by_type.items(), 
+                                    key=lambda x: min(risk_order.get(s['risk'], 4) for s in x[1]))
+                
+                for secret_type, secrets in sorted_types:
+                    type_config = SECRET_TYPES.get(secret_type, {'icon': '🔓'})
+                    secret_details_html += f"""
+                        <div style='margin-bottom:0.5rem'>
+                            <strong>{type_config['icon']} {secret_type.replace('_', ' ').title()}</strong>
+                    """
+                    
+                    for secret in secrets:
+                        risk_color = {'critical': '#991b1b', 'high': '#dc2626', 'medium': '#f59e0b', 'low': '#3b82f6'}
+                        color = risk_color.get(secret['risk'], '#6b7280')
+                        secret_details_html += f"""
+                            <div style='margin-left:1rem;padding:0.25rem 0'>
+                                <code style='background:#fee2e2;padding:2px 4px;border-radius:2px'>{secret['value']}</code>
+                                <span style='color:{color};font-size:0.7rem;margin-left:0.5rem'>{secret['risk'].upper()}</span>
+                                <em style='color:#6b7280;font-size:0.7rem'> - {secret['reason']}</em>
+                            </div>
+                        """
+                    
+                    secret_details_html += "</div>"
+                
+                secret_details_html += """
+                                </div>
+                            </details>
+                """
+
+        # Enhanced download display
+        dl_badge = ""
+        download_details = ""
+        if f.get('downloadable'):
+            file_size = download_meta.get('size', 0)
+            file_type = download_meta.get('file_type', 'Unknown')
+            mime_type = download_meta.get('mime_type', '')
+            
+            # Format file size
+            if file_size > 1048576:
+                size_str = f"{file_size / 1048576:.1f} MB"
+            elif file_size > 1024:
+                size_str = f"{file_size / 1024:.1f} KB"
+            else:
+                size_str = f"{file_size} B"
+            
+            dl_badge = f"""<span style='background:#0369a1;color:#fff;padding:4px 8px;border-radius:4px;font-size:0.75rem'>
+                📥 {file_type} ({size_str})
+            </span>"""
+            
+            # Add file details
+            if mime_type or file_size > 0:
+                sha256 = download_meta.get('sha256', '')
+                download_details = f"""
+                    <details style='margin-top:0.5rem;font-size:0.8rem'>
+                        <summary style='cursor:pointer;'>Download Details</summary>
+                        <div style='margin-top:0.5rem;padding:0.5rem;background:#f0f9ff;border-radius:4px'>
+                            <strong>File Information:</strong><br>
+                            MIME Type: <code>{mime_type or 'Unknown'}</code><br>
+                            Size: {size_str}<br>
+                            {f'SHA256: <code style="font-size:0.7rem">{sha256[:32]}...</code><br>' if sha256 else ''}
+                            <a href="{f['url']}" target="_blank" style="color:#0369a1">Download File →</a>
+                        </div>
+                    </details>
+                """
+
+        if cve_badge or secret_badge or tech_badge_html or dl_badge:
             html += f"""
-                            <div class="metadata-item">{vt_badge} {cve_badge} {secret_badge} {tech_badge_html}</div>
+                            <div class="metadata-item">{dl_badge} {cve_badge} {secret_badge} {tech_badge_html}</div>
             """
+        # append secret details if any
+        if secret_details_html:
+            html += secret_details_html
+            
+        # append download details if any
+        if download_details:
+            html += download_details
 
         # Collapsible CVE details table
         if cve_summary:

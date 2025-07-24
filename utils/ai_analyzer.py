@@ -45,15 +45,13 @@ def classify_screenshot_with_gpt(screenshot_path, url_context=None, page_text=No
         with open(screenshot_path, "rb") as img:
             base64_image = base64.b64encode(img.read()).decode("utf-8")
 
-        # Enhanced prompt with URL context removed and explicit instruction to ignore URL
+        # Refined prompt – *no* URL context included to avoid bias
         prompt_text = (
-            "You are an expert website security AI helping classify screenshots for vulnerability assessment. "
-            "Analyse ONLY the visible page content – completely ignore any address-bar/URL text or file name hints. "
-            "Classify the screenshot into EXACTLY ONE category based strictly on what the user would see rendered in the browser.\n\n"
+            "You are an expert security analyst. Your task is to classify a WEB PAGE strictly based on its VISIBLE "
+            "content (what a human user sees rendered in the browser). Absolutely IGNORE any address-bar text, "
+            "file names, URLs, or query-parameters – they are unreliable. Only visual elements such as headings, "
+            "forms, logos, buttons, tables, error messages, etc., should influence your decision.\n\n"
         )
-        
-        if url_context:
-            prompt_text += f"URL Context (for reference only, ignore in visual judgement): {url_context}\n\n"
 
         # Append visible page text if available (helps JS-rendered pages)
         if page_text:
@@ -168,10 +166,10 @@ def batch_classify_screenshots(screenshot_tasks, max_workers=3):
         # Use GPT vision for verification or if URL pattern doesn't match
         gpt_classification = classify_screenshot_with_gpt(screenshot_path, url_context=url, page_text=page_text)
         
-        # If URL pattern matches and has higher priority, use it
-        if url_classification and get_category_priority(url_classification) >= get_category_priority(gpt_classification):
+        # Prefer GPT vision. Use URL pattern ONLY if GPT returns ambiguous low-priority result.
+        if url_classification and gpt_classification in {"Other", "404/NOT Found", "Unknown"}:
             return screenshot_path, url_classification
-        
+ 
         return screenshot_path, gpt_classification
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
