@@ -63,6 +63,7 @@ SUMMARY_FILE = os.path.join(LOG_DIR, f"summary_{timestamp}.txt")
 
 curl_cache = {}  # url → (is_soft404, sha1_hash, fuzzy_hash, final_status, is_downloadable)
 catch_all_domains = {}  # domain → (is_catch_all, common_hash, common_size)
+unresolved_domains = set()  # Domains that failed DNS resolution – skip further fetch attempts
 init_db()
 
 # ─────────── LOG HELPERS ───────────
@@ -103,18 +104,21 @@ def detect_catch_all_page(domain: str) -> tuple:
         try:
             import warnings
             from urllib3.exceptions import InsecureRequestWarning
-            with warnings.catch_warnings():
-                warnings.simplefilter('ignore', InsecureRequestWarning)
-                resp = requests.get(url, headers=HEADERS, timeout=10, allow_redirects=True, verify=False)
+            resp = requests.get(url, headers=HEADERS, timeout=10, allow_redirects=True, verify=True)
             
             # Only check first 50KB for performance
             content = resp.content[:51200]
             content_hash = hashlib.sha1(content).hexdigest()
+            try:
+                fuzzy = ssdeep.hash(content.decode("latin-1", errors="ignore"))
+            except Exception:
+                fuzzy = ""
             responses.append({
                 'status': resp.status_code,
                 'size': len(resp.content),
                 'hash': content_hash,
-                'url': resp.url
+                'url': resp.url,
+                'fuzzy': fuzzy
             })
         except Exception as e:
             import logging
@@ -132,7 +136,8 @@ def detect_catch_all_page(domain: str) -> tuple:
     
     # Check if all responses have same hash or size
     hashes = [r['hash'] for r in responses]
-    sizes = [r['size'] for r in responses]
+    sizes  = [r['size'] for r in responses]
+    fuzzes = [r['fuzzy'] for r in responses if r.get('fuzzy')]
     
     # If all hashes are identical, it's a catch-all
     if len(set(hashes)) == 1:
@@ -141,6 +146,18 @@ def detect_catch_all_page(domain: str) -> tuple:
     # If all sizes are identical and > 10KB, likely catch-all
     if len(set(sizes)) == 1 and sizes[0] > 10240:
         return (True, None, sizes[0])
+
+    # NEW: if all responses are >90% similar by ssdeep treat as catch-all
+    if len(fuzzes) >= 2:
+        sim_scores = []
+        base = fuzzes[0]
+        for fz in fuzzes[1:]:
+            try:
+                sim_scores.append(ssdeep.compare(base, fz))
+            except Exception:
+                pass
+        if sim_scores and min(sim_scores) >= 90:
+            return (True, None, None)
     
     return (False, None, None)
 
@@ -158,6 +175,13 @@ HEADERS = {
 
 def curl_fetch_hash(url: str):
     """Fetch content using requests (follows redirects) and return soft-404 flag, hashes, final status, and whether it's a direct download."""
+    import urllib.parse as _urlparse
+    domain = _urlparse.urlparse(url).netloc
+
+    # Fast-path: previously marked as unresolved → treat as soft-404 immediately
+    if domain in unresolved_domains:
+        return (True, None, None, None, False, None, None, None)
+
     # Return cached value if present
     if url in curl_cache:
         val = curl_cache[url]
@@ -170,9 +194,7 @@ def curl_fetch_hash(url: str):
         import warnings
         from urllib3.exceptions import InsecureRequestWarning
         # Ignore TLS cert errors so we can still inspect bodies with bad/hostname-mismatch certs
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', InsecureRequestWarning)
-            resp = requests.get(url, headers=HEADERS, timeout=15, allow_redirects=True, verify=False)
+        resp = requests.get(url, headers=HEADERS, timeout=15, allow_redirects=True, verify=True)
         final_status = resp.status_code
 
         # Memory optimization: For HTML, only read what we need
@@ -191,6 +213,14 @@ def curl_fetch_hash(url: str):
         check_size = min(51200, len(body_bytes))  # Check up to 50KB
         body_sample = body_bytes[:check_size].decode("utf-8", errors="ignore").lower()
         is_soft404 = final_status in (404, 410, 403) or any(kw in body_sample for kw in SOFT_404_PHRASES)
+
+        # ️⟵ NEW: meta/JS client redirects to login/auth pages
+        try:
+            redir_target = _extract_client_redirect(resp.url, body_sample)
+            if redir_target and any(pat in redir_target.lower() for pat in ("/login", "/auth", "/signin")):
+                is_soft404 = True
+        except Exception:
+            pass
 
         # Extra rule: many CMSes/routers issue a 301/302 to the site root ("/")
         # for unknown paths and then serve the homepage. This still yields a
@@ -281,6 +311,11 @@ def curl_fetch_hash(url: str):
     except Exception as e:
         import logging
         logging.warning("[curl_fetch] Error fetching %s: %s", url, e)
+
+        # If this was a DNS failure, cache domain to avoid spamming further
+        err_lower = str(e).lower()
+        if "failed to resolve" in err_lower or "name resolution" in err_lower or "nodename nor servname" in err_lower:
+            unresolved_domains.add(domain)
         # Mark network/DNS errors as soft-404 so downstream logic filters them out
         val = (True, None, None, None, False, None, None, None)
 
@@ -341,6 +376,12 @@ def filter_false_positives(domain, results, ignore_hash=False, fast=False):
         if any(pat in url for pat in EXCLUDE_PATTERNS):
             log_skipped_endpoint(r["url"], reason="pattern-skip")
             continue
+
+        # NOTE: Previously we skipped wildcard or dot-prefixed filenames because many
+        # frameworks routed them to catch-all pages.  This was hiding potentially
+        # interesting findings (.env, .git, etc.).  The logic is now removed so the
+        # scanner keeps these paths.  If you need the old behaviour use a future CLI
+        # flag to re-enable it.
         
         # Skip 403 Forbidden responses early
         if status == 403:
@@ -370,15 +411,33 @@ def filter_false_positives(domain, results, ignore_hash=False, fast=False):
         curl_results = parallel_curl_fetch(urls_to_check, max_workers=10)
 
     # Count hash frequencies for soft-404 detection
-    hash_freq = defaultdict(int)
+    hash_freq   = defaultdict(int)
+    fuzzy_freq  = defaultdict(int)  # new
     if not fast:
         for url, result in curl_results.items():
             if result[1]:  # body_hash
                 hash_freq[result[1]] += 1
+
+            # Track fuzzy clusters (group by high similarity)
+            fz = result[2] or ""
+            if fz:
+                matched_key = None
+                for existing in fuzzy_freq.keys():
+                    try:
+                        if ssdeep.compare(fz, existing) > 90:
+                            matched_key = existing
+                            break
+                    except Exception:
+                        pass
+                if matched_key:
+                    fuzzy_freq[matched_key] += 1
+                else:
+                    fuzzy_freq[fz] = 1
     
     # If a hash appears in >30% of results, it's likely a soft-404
     soft_404_threshold = max(3, len(stage1) * 0.3)
-    common_hashes = {h for h, count in hash_freq.items() if count >= soft_404_threshold}
+    common_hashes  = {h for h, count in hash_freq.items()  if count >= soft_404_threshold}
+    common_fuzzes = {h for h, count in fuzzy_freq.items() if count >= soft_404_threshold}
     
     clusters = defaultdict(list)
     for r in stage1:
@@ -395,8 +454,8 @@ def filter_false_positives(domain, results, ignore_hash=False, fast=False):
         else:
             is_soft, body_hash, fuzzy_hash, final_status, is_downloadable, download_meta, vt_result, tech = curl_results.get(r["url"], (False, None, None, None, False, None, None, None))
             
-            # Mark as soft-404 if hash is too common
-            if body_hash in common_hashes:
+            # Mark as soft-404 if hash is too common or final status is 5xx
+            if body_hash in common_hashes or fuzzy_hash in common_fuzzes or (final_status and final_status >= 500):
                 is_soft = True
                 
         r["vt"] = vt_result
@@ -415,6 +474,7 @@ def filter_false_positives(domain, results, ignore_hash=False, fast=False):
 
     final = []
     seen_fuzzy = []
+    seen_sha1  = set()  # fallback dedup when ssdeep unavailable/disabled
     
     # Track counts by status
     new_count = 0
@@ -436,7 +496,7 @@ def filter_false_positives(domain, results, ignore_hash=False, fast=False):
         else:
             is_soft, body_hash, fuzzy_hash, final_status, is_downloadable, download_meta, vt_result, tech = curl_results.get(probe["url"], (False, None, None, None, False, None, None, None))
 
-        if is_soft:
+        if is_soft or fuzzy_hash in common_fuzzes:
             for itm in items:
                 log_skipped_endpoint(itm["url"], reason="curl-soft404")
             print(f"[~] Cluster {key} soft-404 → {len(items)} skipped")
@@ -454,6 +514,15 @@ def filter_false_positives(domain, results, ignore_hash=False, fast=False):
                     log_skipped_endpoint(itm["url"], reason="fuzzy-dupe")
                     continue
                 seen_fuzzy.append(fuzzy)
+
+                # Fallback duplicate check (sha1) – kicks in when fuzzy hashing is
+                # unavailable (empty string) or when the ssdeep module is missing.
+                body_h = itm.get("body_hash")
+                if body_h and body_h in seen_sha1:
+                    log_skipped_endpoint(itm["url"], reason="sha1-dupe")
+                    continue
+                if body_h:
+                    seen_sha1.add(body_h)
 
                 # Assign AI tag early for downloadable files
                 if itm.get("downloadable"):
