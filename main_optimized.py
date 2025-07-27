@@ -6,7 +6,7 @@ os.environ['MallocStackLogging'] = '0'
 from dotenv import load_dotenv
 from utils.scanner import run_ffuf, retry_rate_limited_paths
 from utils.filters import filter_false_positives
-from utils.screenshot import take_screenshots_parallel, filter_screenshot_tasks, prioritize_screenshot_tasks, initialize_screenshot_system
+from utils.screenshot import take_screenshots_parallel, filter_screenshot_tasks, initialize_screenshot_system
 from utils.ai_analyzer import classify_screenshot_with_gpt, batch_classify_screenshots
 from utils.slack_alert import send_consolidated_slack_alert, send_rate_limit_alert, send_critical_alert, send_simple_slack_message
 from utils.reporter import export_tag_based_reports, create_dashboard
@@ -65,7 +65,7 @@ def parse_args():
     parser.add_argument("--no-critical-alerts", action="store_true", help="Disable real-time critical alerts")
     parser.add_argument("--performance-report", action="store_true", help="Generate performance metrics report")
     parser.add_argument("--fast-filter", action="store_true", help="Skip deep curl/hash checks to speed up filtering")
-    parser.add_argument("--lightweight-screenshots", action="store_true", help="[DISABLED] Always using full browser screenshots as requested")
+    parser.add_argument("--lightweight-screenshots", action="store_true", help="[DEPRECATED] Option no longer used, full screenshots are always generated")
     parser.add_argument("--optimize-resources", action="store_true", help="Enable resource optimization (default: enabled)")
     parser.add_argument("--disable-resource-optimization", action="store_true", help="Disable resource optimization")
     return parser.parse_args()
@@ -118,8 +118,18 @@ def check_and_send_critical_alerts(domain, findings, no_critical_alerts=False):
         send_critical_alert(domain, critical_findings)
 
 # ──────────── OPTIMIZED DOMAIN PROCESSOR ────────────
-def process_domain_optimized(domain, wordlist, ignore_hash, screenshot_workers, no_critical_alerts=False, fast_filter=False, lightweight_screenshots=False):
-    """Optimized domain processing"""
+def process_domain_optimized(domain, wordlist, ignore_hash, screenshot_workers, no_critical_alerts=False, fast_filter=False):
+    """
+    Process a single domain with optimized workflow
+    
+    Args:
+        domain: Domain to scan
+        wordlist: Path to wordlist file
+        ignore_hash: Whether to ignore previous scan hash
+        screenshot_workers: Max parallel screenshot workers
+        no_critical_alerts: Disable critical alerts
+        fast_filter: Use fast filtering
+    """
     start_time = time.time()
     perf_metrics = {}
     
@@ -200,8 +210,8 @@ def process_domain_optimized(domain, wordlist, ignore_hash, screenshot_workers, 
                 if any(ext in path_lower for ext in ['.css', '.js', '.png', '.jpg', '.gif']):
                     priority = "low"
                 
-                # Don't use lightweight mode - user wants full screenshots for all paths
-                # Even with --lightweight-screenshots option set
+                # Always use full browser screenshots for all URLs
+                # Lightweight mode has been deprecated
                 
                 screenshot_tasks.append({
                     "url": entry["url"],
@@ -341,8 +351,7 @@ def process_domains_parallel(domains_with_wordlists, args, shared_results):
                 args.ignore_hash,
                 args.screenshot_workers,
                 args.no_critical_alerts,
-                args.fast_filter,
-                args.lightweight_screenshots
+                args.fast_filter
             )
             future_to_domain[future] = domain
         

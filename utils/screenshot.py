@@ -13,6 +13,10 @@ import uuid
 import shutil
 import random
 from typing import Dict, List, Any, Optional, Tuple
+import urllib3
+
+# Suppress insecure request warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -48,8 +52,8 @@ except ImportError:
     _PURE_SCREENSHOT_AVAILABLE = False
 
 # Default concurrency - will be updated by initialize_screenshot_system
-_MAX_WORKERS = 2
-_browser_semaphore = threading.Semaphore(_MAX_WORKERS)
+_MAX_WORKERS = 1
+_browser_semaphore = threading.Semaphore(1)
 
 # Browser process timeout
 _BROWSER_PROCESS_TIMEOUT = 30  # seconds
@@ -89,24 +93,138 @@ def clean_browser_environment():
     """Clean up browser environment before starting"""
     # Kill stuck browser processes
     if resource_manager:
-        killed = resource_manager.kill_browser_processes()
-        if killed > 0:
-            logger.info(f"Cleaned up {killed} browser processes")
-        
-        # Clean temporary directories
-        cleaned = resource_manager.clean_temporary_dirs()
-        if cleaned > 0:
-            logger.info(f"Cleaned up {cleaned} temporary directories")
+        try:
+            killed = resource_manager.kill_browser_processes()
+            if killed > 0:
+                logger.info(f"Cleaned up {killed} browser processes")
+            
+            # Clean temporary directories
+            cleaned = resource_manager.clean_temporary_dirs()
+            if cleaned > 0:
+                logger.info(f"Cleaned up {cleaned} temporary directories")
+        except Exception as e:
+            logger.error(f"Error during browser environment cleanup: {e}")
     
     # Always clean temp dirs by pattern
-    temp_dir = tempfile.gettempdir()
-    browser_patterns = ['chrome_', 'firefox_', 'gecko_', 'tmp_']
-    for item in os.listdir(temp_dir):
-        if any(item.startswith(pattern) for pattern in browser_patterns) and os.path.isdir(os.path.join(temp_dir, item)):
-            try:
-                shutil.rmtree(os.path.join(temp_dir, item), ignore_errors=True)
-            except Exception:
-                pass
+    try:
+        temp_dir = tempfile.gettempdir()
+        browser_patterns = ['chrome_', 'firefox_', 'gecko_', 'tmp_']
+        for item in os.listdir(temp_dir):
+            if any(item.startswith(pattern) for pattern in browser_patterns) and os.path.isdir(os.path.join(temp_dir, item)):
+                try:
+                    shutil.rmtree(os.path.join(temp_dir, item), ignore_errors=True)
+                except Exception as e:
+                    logger.error(f"Failed to remove temp dir {os.path.join(temp_dir, item)}: {e}")
+    except Exception as e:
+        logger.error(f"Error cleaning temporary directories: {e}")
+
+def create_fallback_screenshot(url, output_path):
+    """Create a fallback screenshot when Selenium fails"""
+    try:
+        # Try using requests to get page content
+        import os
+        import requests
+        from PIL import Image, ImageDraw
+        
+        logger.info(f"Creating fallback screenshot for {url}")
+        
+        # Try to fetch page content
+        try:
+            response = requests.get(url, timeout=15, verify=False, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124 Safari/537.36'
+            })
+            content = response.text
+            status = response.status_code
+            
+            # Try to extract title
+            title = None
+            if "<title>" in content and "</title>" in content:
+                title_start = content.find("<title>") + 7
+                title_end = content.find("</title>", title_start)
+                title = content[title_start:title_end].strip()
+        except Exception as e:
+            content = None
+            status = "Error"
+            title = None
+            logger.warning(f"Failed to fetch content from {url}: {e}")
+        
+        # Create a simple image with the URL and status
+        width, height = 1280, 800
+        img = Image.new('RGB', (width, height), color=(240, 240, 240))
+        draw = ImageDraw.Draw(img)
+        
+        # Draw header bar
+        draw.rectangle([(0, 0), (width, 60)], fill=(70, 130, 180))
+        draw.text((20, 20), f"URL: {url}", fill=(255, 255, 255))
+        
+        # Add content info
+        y_pos = 80
+        draw.text((20, y_pos), f"Status: {status}", fill=(0, 0, 0))
+        y_pos += 30
+        
+        if title:
+            draw.text((20, y_pos), f"Title: {title}", fill=(0, 0, 0))
+            y_pos += 30
+            
+        draw.text((20, y_pos), "Screenshot created with fallback method", fill=(100, 100, 100))
+        y_pos += 30
+        
+        # Add content preview if available
+        if content:
+            content_preview = content[:1000].replace('\n', ' ')
+            y_pos += 20
+            draw.text((20, y_pos), "Content Preview:", fill=(0, 0, 0))
+            y_pos += 20
+            
+            # Add content lines
+            for i in range(0, min(800, len(content_preview)), 80):
+                line = content_preview[i:i+80]
+                draw.text((20, y_pos), line, fill=(60, 60, 60))
+                y_pos += 20
+                if y_pos > height - 20:
+                    break
+        
+        # Ensure output directory exists
+        dir_path = os.path.dirname(output_path)
+        if not os.path.exists(dir_path):
+            os.makedirs(dir_path, exist_ok=True)
+        
+        # Save image and text
+        img.save(output_path)
+        logger.info(f"Fallback image saved to {output_path}")
+        
+        # Save text content if available
+        try:
+            text_path = output_path.rsplit('.', 1)[0] + '.txt'
+            with open(text_path, 'w', encoding='utf-8') as f:
+                f.write(content if content else f"Failed to retrieve content for {url}")
+        except Exception as e:
+            logger.warning(f"Failed to save text content: {e}")
+        
+        return True
+    except Exception as e:
+        logger.error(f"Fallback screenshot failed: {e}")
+        
+        # Last resort: create empty files
+        try:
+            import os
+            dir_path = os.path.dirname(output_path)
+            if not os.path.exists(dir_path):
+                os.makedirs(dir_path, exist_ok=True)
+                
+            with open(output_path, 'wb') as f:
+                f.write(b'')
+                
+            text_path = output_path.rsplit('.', 1)[0] + '.txt'
+            with open(text_path, 'w', encoding='utf-8') as f:
+                f.write(f"Screenshot unavailable for {url}")
+                
+            logger.info(f"Created empty placeholder files for {url}")
+        except Exception as inner_e:
+            logger.error(f"Failed to create empty files: {inner_e}")
+        
+        # Return False but don't raise an exception
+        return False
 
 def take_screenshot(url, output_path, priority="normal"):
     """Take a screenshot of a URL with smart strategy selection
@@ -119,32 +237,24 @@ def take_screenshot(url, output_path, priority="normal"):
     Returns:
         bool: True if successful, False otherwise
     """
-    # Always attempt browser-based screenshots first for all priorities
-    # Only use fallback if browser approach fails
-    success = take_browser_screenshot(url, output_path)
-    
-    # If browser screenshot fails, try the fallback method
-    if not success and _PURE_SCREENSHOT_AVAILABLE:
-        try:
-            logger.info(f"Browser screenshot failed, trying pure screenshot for {url}")
-            return pure_take_screenshot(url, output_path)
-        except Exception as e:
-            logger.warning(f"Pure screenshot failed, using fallback: {e}")
+    try:
+        # Always attempt browser-based screenshots first for all priorities
+        # Only use fallback if browser approach fails
+        success = take_browser_screenshot(url, output_path)
+        
+        # If browser screenshot fails, try the fallback method
+        if not success:
+            logger.info(f"Browser screenshot failed, using fallback for {url}")
             return create_fallback_screenshot(url, output_path)
             
-    return success
-
-def take_lightweight_screenshot(url, output_path):
-    """Take a screenshot using lightweight methods (no browser)"""
-    # Try pure screenshot module if available
-    if _PURE_SCREENSHOT_AVAILABLE:
+        return success
+    except Exception as e:
+        logger.error(f"Screenshot error for {url}: {e}")
         try:
-            return pure_take_screenshot(url, output_path)
-        except Exception as e:
-            logger.warning(f"Pure screenshot method failed: {e}")
-    
-    # Fallback to our own implementation
-    return create_fallback_screenshot(url, output_path)
+            return create_fallback_screenshot(url, output_path)
+        except Exception as e2:
+            logger.error(f"Fallback also failed: {e2}")
+            return False
 
 def take_browser_screenshot(url, output_path):
     """Take a screenshot using a browser (Selenium) with minimal resource usage"""
@@ -254,7 +364,9 @@ def take_browser_screenshot(url, output_path):
                     pass
                 
                 # Ensure output directory exists
-                os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                dir_path = os.path.dirname(output_path)
+                if not os.path.exists(dir_path):
+                    os.makedirs(dir_path, exist_ok=True)
                 
                 # Take screenshot
                 driver.save_screenshot(output_path)
@@ -267,7 +379,7 @@ def take_browser_screenshot(url, output_path):
                         try:
                             # Extract only the essentials
                             title = driver.title
-                            url = driver.current_url
+                            current_url = driver.current_url
                             
                             # Get meta description if exists
                             meta_desc = ""
@@ -280,7 +392,7 @@ def take_browser_screenshot(url, output_path):
                                 
                             # Write minimal content
                             f.write(f"Title: {title}\n")
-                            f.write(f"URL: {url}\n")
+                            f.write(f"URL: {current_url}\n")
                             if meta_desc:
                                 f.write(f"Description: {meta_desc}\n")
                         except Exception:
@@ -296,19 +408,19 @@ def take_browser_screenshot(url, output_path):
                 if driver:
                     try:
                         driver.quit()
-                    except Exception:
-                        pass
+                    except Exception as qe:
+                        logger.warning(f"Failed to quit driver: {qe}")
                     driver = None
         
         if not success:
-            logger.error(f"All browser configurations failed for {url}, using fallback")
-            return create_fallback_screenshot(url, output_path)
+            logger.error(f"All browser configurations failed for {url}")
+            return False
             
         return True
         
     except Exception as e:
         logger.error(f"Screenshot failed: {e}")
-        return create_fallback_screenshot(url, output_path)
+        return False
     finally:
         # Ensure driver is properly closed
         if driver:
@@ -323,21 +435,25 @@ def take_browser_screenshot(url, output_path):
             try:
                 import signal
                 import os
-                os.kill(process_pid, signal.SIGTERM)
-                logger.debug(f"Sent SIGTERM to browser process {process_pid}")
-                # Give it a moment to terminate gracefully
-                time.sleep(0.5)
                 try:
+                    os.kill(process_pid, signal.SIGTERM)
+                    logger.debug(f"Sent SIGTERM to browser process {process_pid}")
+                    # Give it a moment to terminate gracefully
+                    time.sleep(0.5)
+                    
                     # Check if process still exists
-                    os.kill(process_pid, 0)
-                    # If we get here, process is still running, try SIGKILL
-                    os.kill(process_pid, signal.SIGKILL)
-                    logger.debug(f"Sent SIGKILL to browser process {process_pid}")
-                except OSError:
-                    # Process no longer exists, which is what we want
-                    pass
+                    try:
+                        os.kill(process_pid, 0)
+                        # If we get here, process is still running, try SIGKILL
+                        os.kill(process_pid, signal.SIGKILL)
+                        logger.debug(f"Sent SIGKILL to browser process {process_pid}")
+                    except OSError:
+                        # Process no longer exists, which is what we want
+                        pass
+                except Exception as ke:
+                    logger.warning(f"Error killing browser process {process_pid}: {ke}")
             except Exception as e:
-                logger.warning(f"Error killing browser process {process_pid}: {e}")
+                logger.warning(f"Error during process cleanup: {e}")
         
         # Clean up temporary directories
         try:
@@ -349,15 +465,6 @@ def take_browser_screenshot(url, output_path):
         
         # Release semaphore
         _browser_semaphore.release()
-        
-        # Additional system-wide cleanup for persistent processes
-        if resource_manager:
-            try:
-                # Only do this occasionally to avoid overhead
-                if random.random() < 0.1:  # 10% chance
-                    resource_manager.kill_browser_processes(timeout_seconds=2)
-            except Exception:
-                pass
 
 def get_browser_configs(temp_dir):
     """Get a list of browser configurations to try in order"""
@@ -572,144 +679,6 @@ def find_firefox_binary(binary_name='firefox'):
     logger.warning(f"Could not find {binary_name} binary")
     return None
 
-def create_fallback_screenshot(url, output_path):
-    """Create a fallback screenshot when Selenium fails"""
-    try:
-        # Try using requests to get page content
-        import requests
-        from PIL import Image, ImageDraw
-        
-        logger.info(f"Creating fallback screenshot for {url}")
-        
-        # Try to fetch page content
-        try:
-            response = requests.get(url, timeout=15, verify=False, headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124 Safari/537.36'
-            })
-            content = response.text
-            status = response.status_code
-            
-            # Try to extract title
-            title = None
-            if "<title>" in content and "</title>" in content:
-                title_start = content.find("<title>") + 7
-                title_end = content.find("</title>", title_start)
-                title = content[title_start:title_end].strip()
-        except Exception:
-            content = None
-            status = "Error"
-            title = None
-        
-        # Create a simple image with the URL and status
-        width, height = 1280, 800
-        img = Image.new('RGB', (width, height), color=(240, 240, 240))
-        draw = ImageDraw.Draw(img)
-        
-        # Draw header bar
-        draw.rectangle([(0, 0), (width, 60)], fill=(70, 130, 180))
-        draw.text((20, 20), f"URL: {url}", fill=(255, 255, 255))
-        
-        # Add content info
-        y_pos = 80
-        draw.text((20, y_pos), f"Status: {status}", fill=(0, 0, 0))
-        y_pos += 30
-        
-        if title:
-            draw.text((20, y_pos), f"Title: {title}", fill=(0, 0, 0))
-            y_pos += 30
-            
-        draw.text((20, y_pos), "Screenshot created with fallback method", fill=(100, 100, 100))
-        y_pos += 30
-        
-        # Add content preview if available
-        if content:
-            content_preview = content[:1000].replace('\n', ' ')
-            y_pos += 20
-            draw.text((20, y_pos), "Content Preview:", fill=(0, 0, 0))
-            y_pos += 20
-            
-            # Add content lines
-            for i in range(0, min(800, len(content_preview)), 80):
-                line = content_preview[i:i+80]
-                draw.text((20, y_pos), line, fill=(60, 60, 60))
-                y_pos += 20
-                if y_pos > height - 20:
-                    break
-        
-        # Ensure output directory exists
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        
-        # Save image and text
-        img.save(output_path)
-        logger.info(f"Fallback image saved to {output_path}")
-        
-        # Save text content if available
-        text_path = output_path.rsplit('.', 1)[0] + '.txt'
-        with open(text_path, 'w', encoding='utf-8') as f:
-            f.write(content if content else f"Failed to retrieve content for {url}")
-        
-        return True
-    except Exception as e:
-        logger.error(f"Fallback screenshot failed: {e}")
-        
-        # Last resort: create empty files
-        try:
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            with open(output_path, 'wb') as f:
-                f.write(b'')
-            text_path = output_path.rsplit('.', 1)[0] + '.txt'
-            with open(text_path, 'w') as f:
-                f.write(f"Screenshot unavailable for {url}")
-        except Exception:
-            pass
-        
-        return False
-
-# ──────────── Batch processing functions ────────────
-
-def prioritize_screenshot_tasks(findings):
-    """Sort findings by priority for progressive screenshot capture"""
-    # Determine priority for each finding
-    priority_findings = []
-    
-    for finding in findings:
-        if finding is None:
-            continue
-            
-        # Skip items marked as downloadable
-        if finding.get('downloadable'):
-            continue
-            
-        # Determine priority based on various factors
-        priority = "normal"
-        
-        # Higher priority for certain paths
-        path = finding.get('path', '').lower()
-        status = finding.get('status', 0)
-        
-        # High priority for login, admin, config, etc.
-        sensitive_terms = ['login', 'admin', 'dashboard', 'config', 'setup', 
-                          'install', 'phpinfo', 'backup', '.git', '.env']
-                          
-        if any(term in path for term in sensitive_terms):
-            priority = "high"
-            
-        # High priority for 200 OK responses to potentially interesting paths
-        elif status == 200 and any(ext in path for ext in ['.php', '.asp', '.jsp']):
-            priority = "high"
-            
-        # Lower priority for static files, images, etc.
-        elif any(ext in path for ext in ['.css', '.js', '.png', '.jpg', '.gif', '.svg']):
-            priority = "low"
-            
-        priority_findings.append((finding, priority))
-    
-    # Sort by priority: high -> normal -> low
-    priority_order = {"high": 0, "normal": 1, "low": 2}
-    priority_findings.sort(key=lambda x: priority_order[x[1]])
-    
-    return priority_findings
-
 def filter_screenshot_tasks(findings):
     """Filter findings to identify unique screenshots needed"""
     # Keep track of unique URLs needing screenshots
@@ -836,7 +805,7 @@ if __name__ == "__main__":
     output_path = os.path.join(output_dir, "test_screenshot.png")
     
     # Initialize screenshot system
-    initialize_screenshot_system(max_workers=2)
+    initialize_screenshot_system(max_workers=1)
     
     # Take screenshot
     success = take_screenshot(test_url, output_path, priority="high")
