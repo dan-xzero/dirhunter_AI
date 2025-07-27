@@ -149,114 +149,208 @@ def chromedriver_available() -> bool:
 
 # ─────────── single screenshot ───────────
 def take_screenshot(url, output_path):
+    """Take a screenshot of a URL, with robust fallback mechanisms"""
     if not _SELENIUM_AVAILABLE:
         print(f"[i] Skipping screenshot for {url} – selenium not installed.")
         try:
             from utils.screenshot_fallback import create_placeholder_screenshot
             create_placeholder_screenshot(url, output_path)
+            print(f"[✓] Created placeholder screenshot for {url}")
         except ImportError:
             print(f"[!] Screenshot fallback not available for {url}")
         return
+        
     # NEW: throttle concurrent Chrome launches
     if not _chrome_semaphore.acquire(timeout=60):
         print("[!] Could not acquire Chrome semaphore (timeout)")
         try:
             from utils.screenshot_fallback import create_placeholder_screenshot
             create_placeholder_screenshot(url, output_path)
+            print(f"[✓] Created placeholder screenshot after semaphore timeout")
         except ImportError:
             print(f"[!] Screenshot fallback not available after semaphore timeout")
         return
+        
     driver = None
-    try:
-        # Setup Chrome options
-        chrome_options = Options()
-        chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--window-size=1280,800")
-        chrome_options.add_argument("--disable-extensions")
-        chrome_options.add_argument("--disable-plugins")
-        chrome_options.add_argument("--disable-images")  # Faster loading
-        chrome_options.add_argument("--disable-javascript")  # Faster loading
-        chrome_options.add_argument("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36")
-        # ─── Handle invalid certificates / HTTPS interstitials ──────────────
-        chrome_options.add_argument("--ignore-certificate-errors")
-        chrome_options.add_argument("--allow-insecure-localhost")
-        # Tells ChromeDriver to automatically accept insecure certs
-        chrome_options.set_capability("acceptInsecureCerts", True)
-        
-        # Setup driver service (may be None – in that case rely on Selenium Manager)
-        service = setup_chrome_driver()
-
-        # Create driver – pass *service* only if we actually located one
-        if service:
-            driver = webdriver.Chrome(service=service, options=chrome_options)
-        else:
-            driver = webdriver.Chrome(options=chrome_options)
-        driver.set_page_load_timeout(30)
-        driver.implicitly_wait(10)
-        
-        # Navigate and take screenshot
-        driver.get(url)
-
-        # If Chrome shows SSL interstitial, attempt auto-bypass by sending the
-        # magic text "thisisunsafe" (works in Chromium-based browsers).
+    success = False
+    
+    # Ensure output directory exists
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
+    # Try multiple Chrome configurations
+    for attempt, config in enumerate(_get_chrome_configs(), 1):
+        if success:
+            break
+            
         try:
-            page_source_lower = driver.page_source.lower()
-            if ("your connection is not private" in page_source_lower or
-                "net::err_cert" in page_source_lower):
-                body_el = driver.find_element(By.TAG_NAME, "body")
-                body_el.send_keys("thisisunsafe")
-                # give it a moment to navigate
-                time.sleep(2)
-        except Exception:
-            pass
-        
-        # Wait a moment for page to load
-        try:
-            WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located((By.TAG_NAME, "body"))
-            )
-        except:
-            pass  # Continue even if body not found
-        
-        # Ensure output directory exists
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        
-        # Take screenshot
-        driver.save_screenshot(output_path)
-        print(f"[✔] Screenshot saved: {output_path}")
-
-        # Capture page text content for JS-rendered pages
-        try:
-            page_text = driver.execute_script("return document.body.innerText || '';")
-        except Exception:
-            page_text = ''
-
-        text_path = output_path.rsplit('.', 1)[0] + '.txt'
-        if page_text.strip():
-            with open(text_path, 'w', encoding='utf-8') as tp:
-                tp.write(page_text)
-            print(f"[i] Page text saved: {text_path}")
-        else:
-            # create empty file to signal capture attempt
-            open(text_path, 'w').close()
-    except Exception as e:
-        print(f"[!] Screenshot failed: {e}")
+            print(f"[i] Screenshot attempt {attempt} for {url}")
+            driver = _create_chrome_driver(config)
+            if not driver:
+                continue
+                
+            driver.set_page_load_timeout(30)
+            print(f"[i] Navigating to {url}...")
+            driver.get(url)
+            
+            # If Chrome shows SSL interstitial, attempt auto-bypass
+            try:
+                page_source_lower = driver.page_source.lower()
+                if ("your connection is not private" in page_source_lower or
+                    "net::err_cert" in page_source_lower):
+                    body_el = driver.find_element(By.TAG_NAME, "body")
+                    body_el.send_keys("thisisunsafe")
+                    # give it a moment to navigate
+                    time.sleep(2)
+            except Exception:
+                pass
+            
+            # Wait a moment for page to load
+            try:
+                WebDriverWait(driver, 5).until(
+                    EC.presence_of_element_located((By.TAG_NAME, "body"))
+                )
+            except:
+                pass  # Continue even if body not found
+            
+            # Take screenshot
+            driver.save_screenshot(output_path)
+            print(f"[✔] Screenshot saved: {output_path}")
+            success = True
+            
+            # Capture page text content for JS-rendered pages
+            try:
+                page_text = driver.execute_script("return document.body.innerText || '';")
+            except Exception:
+                page_text = ''
+                
+            text_path = output_path.rsplit('.', 1)[0] + '.txt'
+            if page_text.strip():
+                with open(text_path, 'w', encoding='utf-8') as tp:
+                    tp.write(page_text)
+                print(f"[i] Page text saved: {text_path}")
+            else:
+                # create empty file to signal capture attempt
+                open(text_path, 'w').close()
+                
+        except Exception as e:
+            print(f"[!] Screenshot attempt {attempt} failed: {e}")
+            # Continue to next configuration
+        finally:
+            if driver:
+                try:
+                    driver.quit()
+                except:
+                    pass
+            # Clean up temp directory if used
+            if config.get('temp_dir'):
+                try:
+                    import shutil
+                    shutil.rmtree(config['temp_dir'], ignore_errors=True)
+                except Exception:
+                    pass
+    
+    # If all attempts failed, use fallback
+    if not success:
+        print(f"[!] All screenshot attempts failed for {url}")
         try:
             from utils.screenshot_fallback import create_placeholder_screenshot
             create_placeholder_screenshot(url, output_path)
-            print(f"[i] Created placeholder screenshot for {url}")
+            print(f"[✓] Created placeholder screenshot after all attempts failed")
         except ImportError:
-            print(f"[!] Screenshot fallback not available after error: {e}")
-    finally:
-        if driver:
-            try:
-                driver.quit()
-            except Exception:
-                pass
-        _chrome_semaphore.release()
+            print(f"[!] Screenshot fallback not available after failed attempts")
+    
+    # Always release the semaphore
+    _chrome_semaphore.release()
+
+
+def _get_chrome_configs():
+    """Get list of Chrome configurations to try"""
+    configs = []
+    
+    # Config 1: No user data directory
+    configs.append({
+        'options': [
+            "--headless",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--window-size=1280,800",
+            "--disable-extensions",
+            "--disable-plugins",
+            "--disable-images",
+            "--disable-javascript"
+        ],
+        'capabilities': {
+            'acceptInsecureCerts': True
+        }
+    })
+    
+    # Config 2: With unique user data directory
+    import tempfile
+    import uuid
+    temp_dir = os.path.join(tempfile.gettempdir(), f"chrome_temp_{uuid.uuid4().hex}")
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    configs.append({
+        'options': [
+            "--headless",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu", 
+            "--window-size=1280,800",
+            "--disable-extensions",
+            "--disable-plugins",
+            "--disable-images",
+            "--disable-javascript",
+            f"--user-data-dir={temp_dir}"
+        ],
+        'capabilities': {
+            'acceptInsecureCerts': True
+        },
+        'temp_dir': temp_dir
+    })
+    
+    # Config 3: Minimal config with incognito
+    configs.append({
+        'options': [
+            "--headless",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--incognito"
+        ],
+        'capabilities': {}
+    })
+    
+    return configs
+
+
+def _create_chrome_driver(config):
+    """Create a Chrome driver with the given configuration"""
+    try:
+        chrome_options = Options()
+        
+        # Add options
+        for option in config.get('options', []):
+            chrome_options.add_argument(option)
+        
+        # Add capabilities
+        for key, value in config.get('capabilities', {}).items():
+            chrome_options.set_capability(key, value)
+        
+        # Try with service first
+        try:
+            service = setup_chrome_driver()
+            if service:
+                return webdriver.Chrome(service=service, options=chrome_options)
+        except Exception:
+            pass
+            
+        # Fall back to direct initialization
+        return webdriver.Chrome(options=chrome_options)
+        
+    except Exception as e:
+        print(f"[!] Failed to create Chrome driver: {e}")
+        return None
 
 # ─────────── pre-filtering ───────────
 def filter_screenshot_tasks(findings):
