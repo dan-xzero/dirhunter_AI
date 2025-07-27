@@ -3,6 +3,7 @@
 
 import socket
 import logging
+import requests
 from urllib.parse import urlparse
 from typing import List, Tuple
 
@@ -26,10 +27,31 @@ def check_dns(domain: str) -> bool:
         return True
     except socket.gaierror as e:
         logger.warning(f"DNS resolution failed for {hostname}: {e}")
-        return False
+        # Initial DNS check failed, try with http/https
+        return check_with_http_https(domain)
     except Exception as e:
         logger.error(f"Unexpected error checking DNS for {hostname}: {e}")
-        return False
+        return check_with_http_https(domain)
+
+def check_with_http_https(domain: str) -> bool:
+    """Try to connect to the domain with http:// and https:// prefixes"""
+    # Don't add prefix if it already has one
+    if domain.startswith(('http://', 'https://')):
+        urls_to_try = [domain]
+    else:
+        urls_to_try = [f"http://{domain}", f"https://{domain}"]
+    
+    for url in urls_to_try:
+        try:
+            logger.info(f"Trying to connect to {url}")
+            response = requests.head(url, timeout=10, allow_redirects=True)
+            if response.status_code < 400:
+                logger.info(f"Successfully connected to {url} (Status: {response.status_code})")
+                return True
+        except requests.RequestException as e:
+            logger.warning(f"Failed to connect to {url}: {e}")
+    
+    return False
 
 def validate_domains(domains: List[str]) -> Tuple[List[str], List[str]]:
     """
@@ -45,7 +67,7 @@ def validate_domains(domains: List[str]) -> Tuple[List[str], List[str]]:
             logger.info(f"✓ DNS OK: {domain}")
         else:
             invalid.append(domain)
-            logger.warning(f"✗ DNS FAIL: {domain}")
+            logger.warning(f"✗ DNS/HTTP FAIL: {domain}")
     
     return valid, invalid
 
@@ -54,12 +76,12 @@ def pre_scan_dns_check(domains: List[str]) -> List[str]:
     Pre-scan DNS check with user notification
     Returns only valid domains
     """
-    print(f"\n[*] Performing DNS validation for {len(domains)} domain(s)...")
+    print(f"\n[*] Performing DNS and connectivity validation for {len(domains)} domain(s)...")
     
     valid, invalid = validate_domains(domains)
     
     if invalid:
-        print(f"\n[!] DNS resolution failed for {len(invalid)} domain(s):")
+        print(f"\n[!] DNS/HTTP resolution failed for {len(invalid)} domain(s):")
         for domain in invalid:
             print(f"    - {domain}")
         print("\nThese domains will be skipped.\n")
@@ -68,5 +90,5 @@ def pre_scan_dns_check(domains: List[str]) -> List[str]:
         print("[!] No valid domains found. Exiting.")
         return []
     
-    print(f"\n[+] {len(valid)} domain(s) passed DNS validation")
+    print(f"\n[+] {len(valid)} domain(s) passed validation")
     return valid 
