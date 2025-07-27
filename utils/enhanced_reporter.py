@@ -10,7 +10,7 @@ from typing import Dict, List, Any, Tuple
 from functools import lru_cache
 import requests
 
-from utils.tech_helpers import extract_tech_and_cves, aggregate_cves, severity_from_count
+from utils.tech_helpers import extract_tech_and_cves, aggregate_cves, severity_from_count, get_vuln_severity
 
 HTML_REPORT_DIR = "results/html"
 
@@ -125,14 +125,34 @@ def create_enhanced_dashboard(all_domains_data, is_update=False):
     global_category_counts = defaultdict(int)
     global_secret_types = defaultdict(int)
     global_cve_severity = defaultdict(int)
-    domain_risk_scores = {}
+    domain_data = {}
+    
+    # Create a set to track all unique vulnerability IDs globally
+    global_vuln_ids = set()
+    
+    # Track severity counts with consistent ordering using a dictionary with predefined keys
+    severity_levels = ["Critical", "High", "Medium", "Low"]
+    global_cve_severity = {level: 0 for level in severity_levels}
     
     # Process each domain
     for domain, findings in all_domains_data.items():
         domain_tech = aggregate_domain_tech(findings)
-        domain_cves = defaultdict(list)
         domain_secrets = defaultdict(int)
-        domain_risk_score = 0  # Initialize risk score
+        domain_downloadable = False
+        
+        # Use aggregate_cves to get unique CVEs for this domain
+        cve_aggregate = aggregate_cves(findings)
+        # Store the unique CVEs by package
+        domain_cves = {pkg: info["ids"] for pkg, info in cve_aggregate["packages"].items()}
+        
+        # Add vulnerabilities to global set for deduplication
+        for pkg_info in cve_aggregate["packages"].values():
+            global_vuln_ids.update(pkg_info["ids"])
+            
+            # Count severity for each individual vulnerability ID
+            for vuln_id in pkg_info["ids"]:
+                severity = get_vuln_severity(vuln_id)
+                global_cve_severity[severity] += 1
         
         for finding in findings:
             status = finding.get('finding_status', 'unknown')
@@ -140,6 +160,10 @@ def create_enhanced_dashboard(all_domains_data, is_update=False):
             
             category = finding.get('ai_tag', 'Other')
             global_category_counts[category] += 1
+            
+            # Check if finding is downloadable
+            if finding.get('downloadable'):
+                domain_downloadable = True
             
             # Process secrets with categorization
             dm = finding.get('download_meta') or {}
@@ -150,42 +174,14 @@ def create_enhanced_dashboard(all_domains_data, is_update=False):
                 )
                 global_secret_types[secret_info['type']] += 1
                 domain_secrets[secret_info['type']] += 1
-                
-                # Add to risk score based on secret risk
-                if secret_info['risk'] == 'critical':
-                    domain_risk_score += 10
-                elif secret_info['risk'] == 'high':
-                    domain_risk_score += 5
-                else:
-                    domain_risk_score += 2
-            
-            # Process CVEs
-            tech_dict = finding.get('tech') or {}
-            if tech_dict.get('cve_details'):
-                for pkg, cves in tech_dict['cve_details'].items():
-                    domain_cves[pkg].extend(cves)
-                    
-                    # Estimate severity
-                    cve_count = len(cves)
-                    severity = severity_from_count(cve_count)
-                    global_cve_severity[severity] += 1
-                    
-                    # Add to risk score based on CVE severity
-                    if severity == 'Critical':
-                        domain_risk_score += 8 * cve_count
-                    elif severity == 'High':
-                        domain_risk_score += 4 * cve_count
-                    elif severity == 'Medium':
-                        domain_risk_score += 2 * cve_count
-                    else:
-                        domain_risk_score += cve_count
-            
-            domain_risk_scores[domain] = {
-                'tech_stack': domain_tech,
-                'cve_summary': dict(domain_cves),
-                'secret_types': dict(domain_secrets),
-                'score': domain_risk_score  # Add the calculated risk score
-            }
+        
+        # Store domain data
+        domain_data[domain] = {
+            'tech_stack': domain_tech,
+            'cve_summary': dict(domain_cves),
+            'secret_types': dict(domain_secrets),
+            'downloadable': domain_downloadable
+        }
     
     # Build enhanced HTML
     html = f"""
@@ -295,63 +291,85 @@ def create_enhanced_dashboard(all_domains_data, is_update=False):
                 border-radius: 8px;
                 border: 1px solid #e5e7eb;
             }}
-            .risk-meter {{
-                height: 20px;
-                background: #e5e7eb;
-                border-radius: 10px;
-                overflow: hidden;
-                margin: 1rem 0;
-            }}
-            .risk-meter-fill {{
-                height: 100%;
-                background: linear-gradient(90deg, #10b981 0%, #f59e0b 50%, #ef4444 100%);
-                transition: width 0.5s ease;
-            }}
-            .cve-summary {
+            .cve-summary {{
                 display: grid;
                 grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
                 gap: 1rem;
                 margin-top: 1rem;
-            }
-            .cve-item {
+            }}
+            .cve-item {{
                 padding: 1rem;
                 border-radius: 8px;
                 border: 1px solid #e5e7eb;
-            }
-            .cve-item h4 {
+            }}
+            .cve-item h4 {{
                 margin-top: 0;
                 margin-bottom: 0.5rem;
-            }
-            .cve-item.cve-severity-critical {
+            }}
+            .cve-item.cve-severity-critical {{
                 background-color: #fee2e2;
                 border-left: 4px solid #ef4444;
-            }
-            .cve-item.cve-severity-high {
+            }}
+            .cve-item.cve-severity-high {{
                 background-color: #fed7aa;
                 border-left: 4px solid #f97316;
-            }
-            .cve-item.cve-severity-medium {
+            }}
+            .cve-item.cve-severity-medium {{
                 background-color: #fef3c7;
                 border-left: 4px solid #f59e0b;
-            }
-            .cve-item.cve-severity-low {
+            }}
+            .cve-item.cve-severity-low {{
                 background-color: #dbeafe;
                 border-left: 4px solid #3b82f6;
-            }
-            .cve-list {
+            }}
+            .cve-list {{
                 margin-top: 0.5rem;
                 padding-left: 1.5rem;
-            }
-            .cve-list li {
+            }}
+            .cve-list li {{
                 margin-bottom: 0.25rem;
-            }
-            .cve-list a {
+            }}
+            .cve-list a {{
                 color: #4f46e5;
                 text-decoration: none;
-            }
-            .cve-list a:hover {
+            }}
+            .cve-list a:hover {{
                 text-decoration: underline;
-            }
+            }}
+            .search-box {{
+                width: 100%;
+                padding: 1rem;
+                margin-bottom: 2rem;
+                border: 1px solid #e5e7eb;
+                border-radius: 8px;
+                font-size: 1rem;
+                background: white;
+            }}
+            .filter-bar {{
+                display: flex;
+                gap: 0.5rem;
+                margin-bottom: 2rem;
+                flex-wrap: wrap;
+            }}
+            .filter-btn {{
+                padding: 0.5rem 1rem;
+                background: #f3f4f6;
+                border: none;
+                border-radius: 6px;
+                font-size: 0.875rem;
+                font-weight: 500;
+                color: #4b5563;
+                cursor: pointer;
+                transition: all 0.2s;
+            }}
+            .filter-btn:hover {{
+                background: #e5e7eb;
+            }}
+            .filter-btn.active {{
+                background: #4f46e5;
+                color: white;
+            }}
+            /* Remove risk meter styles */
         </style>
     </head>
     <body>
@@ -373,10 +391,12 @@ def create_enhanced_dashboard(all_domains_data, is_update=False):
                 
                 <div class="risk-card">
                     <h3>🔐 Security Summary</h3>
-                    <p>Total CVEs: <strong>{sum(global_cve_severity.values())}</strong></p>
+                    <p>Unique Vulnerabilities: <strong>{len(global_vuln_ids)}</strong></p>
                     <p>Total Secrets: <strong>{sum(global_secret_types.values())}</strong></p>
                     <p>Critical Severity: <strong style="color: #ef4444">{global_cve_severity.get('Critical', 0)}</strong></p>
-                    <p>High Risk Domains: <strong>{sum(1 for d in domain_risk_scores.values() if d['score'] > 50)}</strong></p>
+                    <p>High Severity: <strong style="color: #f97316">{global_cve_severity.get('High', 0)}</strong></p>
+                    <p>Medium Severity: <strong style="color: #f59e0b">{global_cve_severity.get('Medium', 0)}</strong></p>
+                    <p>Low Severity: <strong style="color: #3b82f6">{global_cve_severity.get('Low', 0)}</strong></p>
                 </div>
             </div>
             
@@ -393,26 +413,46 @@ def create_enhanced_dashboard(all_domains_data, is_update=False):
             <div class="chart-container" style="height: 300px;">
                 <canvas id="categoryChart"></canvas>
             </div>
+            
+            <!-- Search and Filters -->
+            <input type="text" class="search-box" id="searchInput" placeholder="Search domains...">
+            
+            <div class="filter-bar">
+                <button class="filter-btn active" data-filter="all">All Domains</button>
+                <button class="filter-btn" data-filter="new-findings">New Findings</button>
+                <button class="filter-btn" data-filter="with-vulns">With Vulnerabilities</button>
+                <button class="filter-btn" data-filter="with-secrets">With Secrets</button>
+                <button class="filter-btn" data-filter="with-downloads">With Downloads</button>
+            </div>
     """
     
     # Add domain sections with enhanced details
-    for domain, risk_data in sorted(domain_risk_scores.items(), key=lambda x: -x[1]['score']):
-        risk_score = risk_data['score']
-        risk_percentage = min(100, risk_score * 2)  # Scale for display
+    for domain, domain_info in sorted(domain_data.items(), key=lambda x: x[0]): # Sort by domain name
+        # Calculate counts for filtering
+        new_findings = sum(1 for f in all_domains_data.get(domain, []) if f.get('finding_status') == 'new')
+        
+        # Count unique vulnerability IDs
+        domain_vuln_ids = set()
+        for pkg_ids in domain_info['cve_summary'].values():
+            domain_vuln_ids.update(pkg_ids)
+        domain_vulns_count = len(domain_vuln_ids)
+        
+        domain_secrets_count = sum(domain_info['secret_types'].values()) if domain_info['secret_types'] else 0
         
         html += f"""
-            <div class="domain-section">
+            <div class="domain-section" 
+                 data-domain="{domain}"
+                 data-new-findings="{new_findings}"
+                 data-vulns="{domain_vulns_count}"
+                 data-secrets="{domain_secrets_count}"
+                 data-downloadable="{1 if domain_info['downloadable'] else 0}">
                 <h2>{domain}</h2>
-                <div class="risk-meter">
-                    <div class="risk-meter-fill" style="width: {risk_percentage}%"></div>
-                </div>
-                <p>Risk Score: <strong>{risk_score}</strong></p>
                 
                 <h3>🔧 Technology Stack</h3>
                 <div class="tech-stack-grid">
         """
         
-        for tech_name, tech_info in risk_data['tech_stack'].items():
+        for tech_name, tech_info in domain_info['tech_stack'].items():
             icon = TECH_LOGOS.get(tech_name.lower(), '📦')
             versions = ', '.join(tech_info['versions']) if tech_info['versions'] else 'unknown'
             cve_count = len(tech_info['cves'])
@@ -435,32 +475,55 @@ def create_enhanced_dashboard(all_domains_data, is_update=False):
         """
         
         # Add CVE summary if any
-        if risk_data['cve_summary']:
+        if domain_info['cve_summary']:
             html += """
                 <h3>🩹 CVE Vulnerabilities</h3>
                 <div class="cve-summary">
             """
             
-            for pkg, cves in risk_data['cve_summary'].items():
+            for pkg, cves in domain_info['cve_summary'].items():
                 cve_count = len(cves)
-                severity = severity_from_count(cve_count)
-                severity_class = severity.lower()
+                
+                # Determine severity based on individual vulnerabilities
+                severities = [get_vuln_severity(cve_id) for cve_id in cves]
+                # Use the most severe level (Critical > High > Medium > Low)
+                severity_rank = {"Critical": 4, "High": 3, "Medium": 2, "Low": 1}
+                highest_severity = max(severities, key=lambda s: severity_rank.get(s, 0))
+                severity_class = highest_severity.lower()
                 
                 html += f"""
                     <div class="cve-item cve-severity-{severity_class}">
                         <h4>{pkg}</h4>
-                        <p>Severity: <strong>{severity}</strong> ({cve_count} vulnerabilities)</p>
+                        <p>Severity: <strong>{highest_severity}</strong> ({cve_count} vulnerabilities)</p>
                         <ul class="cve-list">
                 """
                 
-                for cve_id in cves[:5]:  # Limit to 5 CVEs to avoid huge lists
+                # Sort vulnerabilities by severity (highest first)
+                sorted_cves = sorted([(cve_id, get_vuln_severity(cve_id)) for cve_id in cves], 
+                                     key=lambda x: severity_rank.get(x[1], 0), 
+                                     reverse=True)
+                
+                # Show first 5 vulnerabilities
+                for cve_id, cve_severity in sorted_cves[:5]:
+                    severity_color = {
+                        "Critical": "#ef4444",
+                        "High": "#f97316", 
+                        "Medium": "#f59e0b", 
+                        "Low": "#3b82f6"
+                    }.get(cve_severity, "#6b7280")
+                    
                     html += f"""
-                            <li><a href="https://nvd.nist.gov/vuln/detail/{cve_id}" target="_blank">{cve_id}</a></li>
+                            <li>
+                                <a href="{'https://nvd.nist.gov/vuln/detail/' if cve_id.startswith('CVE') else 'https://github.com/advisories/'}{cve_id}" target="_blank">
+                                    {cve_id}
+                                </a>
+                                <span style="color: {severity_color}; font-size: 0.8em; margin-left: 5px;">({cve_severity})</span>
+                            </li>
                     """
                 
-                if len(cves) > 5:
+                if len(sorted_cves) > 5:
                     html += f"""
-                            <li>... and {len(cves) - 5} more</li>
+                            <li>... and {len(sorted_cves) - 5} more vulnerabilities</li>
                     """
                 
                 html += """
@@ -473,12 +536,12 @@ def create_enhanced_dashboard(all_domains_data, is_update=False):
             """
         
         # Add secrets summary if any
-        if risk_data['secret_types']:
+        if domain_info['secret_types']:
             html += """
                 <h3>🔑 Detected Secrets</h3>
                 <div>
             """
-            for secret_type, count in risk_data['secret_types'].items():
+            for secret_type, count in domain_info['secret_types'].items():
                 secret_config = SECRET_TYPES.get(secret_type, {'icon': '🔓', 'risk': 'unknown'})
                 html += f"""
                     <div class="secret-type">
@@ -492,6 +555,14 @@ def create_enhanced_dashboard(all_domains_data, is_update=False):
                 </div>
             """
         
+        # Add downloadable file information if available
+        if domain_info['downloadable']:
+            html += """
+                <h3>📁 Downloadable Files</h3>
+                <p>This domain contains downloadable files that were found during the scan.</p>
+                <p>Please refer to the detailed findings for specific file locations and content.</p>
+            """
+        
         html += f"""
                 <p style="margin-top: 1rem;">
                     <a href="{_slugify_name(domain)}_tags.html" style="color: #667eea;">View detailed findings →</a>
@@ -499,7 +570,7 @@ def create_enhanced_dashboard(all_domains_data, is_update=False):
             </div>
         """
     
-    # Add JavaScript for charts
+    # Add JavaScript for charts and filtering
     html += f"""
         </div>
         
@@ -509,10 +580,10 @@ def create_enhanced_dashboard(all_domains_data, is_update=False):
             new Chart(cveCtx, {{
                 type: 'doughnut',
                 data: {{
-                    labels: {json.dumps(list(global_cve_severity.keys()))},
+                    labels: {json.dumps(severity_levels)},
                     datasets: [{{
-                        data: {json.dumps(list(global_cve_severity.values()))},
-                        backgroundColor: ['#ef4444', '#f59e0b', '#eab308', '#3b82f6'],
+                        data: {json.dumps([global_cve_severity[level] for level in severity_levels])},
+                        backgroundColor: ['#ef4444', '#f97316', '#f59e0b', '#3b82f6'],
                         borderWidth: 0
                     }}]
                 }},
@@ -581,6 +652,54 @@ def create_enhanced_dashboard(all_domains_data, is_update=False):
                     }}
                 }}
             }});
+            
+            // Domain filtering
+            (function() {{
+                const searchInput = document.getElementById('searchInput');
+                const domainSections = document.querySelectorAll('.domain-section');
+                const filterBtns = document.querySelectorAll('.filter-btn');
+                
+                let currentFilter = 'all';
+                
+                function applyFilters() {{
+                    const searchTerm = searchInput.value.toLowerCase();
+                    
+                    domainSections.forEach(section => {{
+                        const domain = section.dataset.domain.toLowerCase();
+                        let show = domain.includes(searchTerm);
+                        
+                        // Apply category filter
+                        if (show && currentFilter !== 'all') {{
+                            switch(currentFilter) {{
+                                case 'new-findings':
+                                    show = parseInt(section.dataset.newFindings) > 0;
+                                    break;
+                                case 'with-vulns':
+                                    show = parseInt(section.dataset.vulns) > 0;
+                                    break;
+                                case 'with-secrets':
+                                    show = parseInt(section.dataset.secrets) > 0;
+                                    break;
+                                case 'with-downloads':
+                                    show = parseInt(section.dataset.downloadable) > 0;
+                                    break;
+                            }}
+                        }}
+                        
+                        section.style.display = show ? '' : 'none';
+                    }});
+                }}
+
+                searchInput.addEventListener('input', applyFilters);
+                filterBtns.forEach(btn => {{
+                    btn.addEventListener('click', () => {{
+                        filterBtns.forEach(b => b.classList.remove('active'));
+                        btn.classList.add('active');
+                        currentFilter = btn.dataset.filter;
+                        applyFilters();
+                    }});
+                }});
+            }})();
         </script>
     </body>
     </html>

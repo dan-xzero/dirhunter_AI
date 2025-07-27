@@ -103,7 +103,8 @@ def extract_tech_and_cves(tech_dict: Dict[str, Any]) -> Tuple[List[str], Dict[st
 
 
 def aggregate_cves(findings: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Return dict with total and unique CVE details across a list of findings."""
+    """Return dict with total and unique vulnerability details across a list of findings.
+    Includes both CVE and GHSA IDs in the total count."""
     summary: Dict[str, Any] = {"total": 0, "packages": {}}
 
     for f in findings:
@@ -121,7 +122,34 @@ def aggregate_cves(findings: List[Dict[str, Any]]) -> Dict[str, Any]:
             else:
                 summary["packages"][pkg] = info
 
-    # total unique CVEs
+    # total unique vulnerability IDs (both CVE and GHSA)
     all_ids = {cid for info in summary["packages"].values() for cid in info["ids"]}
     summary["total"] = len(all_ids)
     return summary 
+
+# Individual vulnerability severity assessment
+def get_vuln_severity(vuln_id: str) -> str:
+    """
+    Determine the severity of an individual vulnerability ID.
+    This is a simplistic approach since we don't have actual CVSS scores.
+    """
+    if not vuln_id:
+        return "Low"
+        
+    vuln_id_lower = vuln_id.lower()
+    
+    # For CVEs, attempt to derive severity from the ID pattern
+    # Some critical vulnerabilities have specific indicators
+    if "critical" in vuln_id_lower or "remote-code" in vuln_id_lower:
+        return "Critical"
+    
+    # Default classification based on ID type
+    if vuln_id.startswith("CVE-"):
+        return "Medium"  # Default for CVEs
+    elif vuln_id.startswith("GHSA-"):
+        # Heuristic: Longer GHSA IDs tend to be more severe (not always accurate)
+        if len(vuln_id) > 15:
+            return "High"
+        return "Medium"
+        
+    return "Low"  # Default for unknown formats 

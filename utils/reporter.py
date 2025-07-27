@@ -98,10 +98,17 @@ def create_dashboard(all_domains_data, is_update=False):
     high_priority_findings.sort(key=lambda x: (-x['priority'], x['domain'], x['url']))
 
     # ------------------------------------------------------------
-    # Global CVE summary across all findings
+    # Global CVE and secret summary across all findings
     # ------------------------------------------------------------
     all_findings_list = [f for findings in all_domains_data.values() for f in findings if f]
-    global_cve_total  = aggregate_cves(all_findings_list)["total"]
+    global_cve_total = aggregate_cves(all_findings_list)["total"]
+    
+    # Calculate global secret count
+    global_secret_count = 0
+    for f in all_findings_list:
+        dm = f.get('download_meta') or {}
+        secret_cnt = len(dm.get('th_secrets', [])) + len(dm.get('potential_secrets', []))
+        global_secret_count += secret_cnt
     
     # Build dashboard HTML
     html = f"""
@@ -430,7 +437,7 @@ def create_dashboard(all_domains_data, is_update=False):
                 </div>
                 <div class="stat-card">
                     <h2>{global_cve_total}</h2>
-                    <p>CVE Vulnerabilities</p>
+                    <p>Unique Vulnerabilities</p>
                 </div>
                 <div class="stat-card">
                     <h2>{global_secret_count}</h2>
@@ -468,14 +475,12 @@ def create_dashboard(all_domains_data, is_update=False):
                 domain_tags.add(tag)
         
         # Count CVEs and secrets
-        domain_cve_count = 0
         domain_secret_count = 0
+        
+        # Use the aggregate_cves function to get unique CVE count
+        domain_cve_count = aggregate_cves(findings)["total"]
+        
         for f in findings:
-            # Count CVEs
-            tech_info = f.get('tech_info', {})
-            if tech_info:
-                cves = tech_info.get('cves', [])
-                domain_cve_count += len(cves)
             
             # Count secrets
             dm = f.get('download_meta') or {}
@@ -510,7 +515,7 @@ def create_dashboard(all_domains_data, is_update=False):
                             </div>
                             <div class="stat">
                                 <div class="value">{domain_cve_count}</div>
-                                <div class="label">CVEs</div>
+                                <div class="label">Unique Vulnerabilities</div>
                             </div>
                             <div class="stat">
                                 <div class="value">{domain_secret_count}</div>
