@@ -28,8 +28,10 @@ except ImportError:
 _SELENIUM_AVAILABLE = False
 try:
     from selenium import webdriver
-    from selenium.webdriver.chrome.options import Options
-    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.chrome.options import Options as ChromeOptions
+    from selenium.webdriver.firefox.options import Options as FirefoxOptions
+    from selenium.webdriver.chrome.service import Service as ChromeService
+    from selenium.webdriver.firefox.service import Service as FirefoxService
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
@@ -47,7 +49,7 @@ except ImportError:
 
 # Default concurrency - will be updated by initialize_screenshot_system
 _MAX_WORKERS = 2
-_chrome_semaphore = threading.Semaphore(_MAX_WORKERS)
+_browser_semaphore = threading.Semaphore(_MAX_WORKERS)
 
 # Browser process timeout
 _BROWSER_PROCESS_TIMEOUT = 30  # seconds
@@ -62,13 +64,13 @@ if resource_manager:
 
 def initialize_screenshot_system(max_workers=2):
     """Initialize the screenshot system with the specified concurrency"""
-    global _MAX_WORKERS, _chrome_semaphore
+    global _MAX_WORKERS, _browser_semaphore
     
     # Update max workers
     _MAX_WORKERS = max_workers
     
     # Create new semaphore
-    _chrome_semaphore = threading.Semaphore(_MAX_WORKERS)
+    _browser_semaphore = threading.Semaphore(_MAX_WORKERS)
     
     # Start resource monitoring if available
     if resource_manager:
@@ -92,10 +94,11 @@ def clean_browser_environment():
         if cleaned > 0:
             logger.info(f"Cleaned up {cleaned} temporary directories")
     
-    # Always clean chrome temp dirs by pattern
+    # Always clean temp dirs by pattern
     temp_dir = tempfile.gettempdir()
+    browser_patterns = ['chrome_', 'firefox_', 'gecko_', 'tmp_']
     for item in os.listdir(temp_dir):
-        if item.startswith('chrome_') and os.path.isdir(os.path.join(temp_dir, item)):
+        if any(item.startswith(pattern) for pattern in browser_patterns) and os.path.isdir(os.path.join(temp_dir, item)):
             try:
                 shutil.rmtree(os.path.join(temp_dir, item), ignore_errors=True)
             except Exception:
@@ -150,8 +153,8 @@ def take_browser_screenshot(url, output_path):
         logger.info(f"Waiting for resources before taking screenshot of {url}")
         resource_manager.wait_if_needed(timeout=60)  # Wait up to a minute
     
-    # Acquire semaphore to limit concurrent Chrome instances
-    if not _chrome_semaphore.acquire(timeout=60):
+    # Acquire semaphore to limit concurrent browser instances
+    if not _browser_semaphore.acquire(timeout=60):
         logger.warning(f"Semaphore timeout - using fallback for {url}")
         return create_fallback_screenshot(url, output_path)
     
@@ -159,35 +162,48 @@ def take_browser_screenshot(url, output_path):
     temp_dir = None
     success = False
     process_pid = None
+    browser_type = None
     
     try:
-        # Create a unique temporary directory for Chrome user data
-        temp_dir = os.path.join(tempfile.gettempdir(), f"chrome_{uuid.uuid4().hex}")
+        # Create a unique temporary directory for browser user data
+        temp_dir = os.path.join(tempfile.gettempdir(), f"browser_{uuid.uuid4().hex}")
         os.makedirs(temp_dir, exist_ok=True)
         
         # Try multiple browser configurations until one succeeds
         for browser_config in get_browser_configs(temp_dir):
             try:
-                # Configure Chrome options
+                # Get browser type and options
+                browser_type = browser_config.get('type', 'chrome')
                 options = browser_config.get('options')
-                binary_location = browser_config.get('binary')
+                binary = browser_config.get('binary')
                 
                 # Setup driver with timeout
-                logger.info(f"Initializing browser for {url} with config: {browser_config.get('name')}")
+                logger.info(f"Initializing {browser_type} for {url} with config: {browser_config.get('name')}")
                 
-                # Try to find chromedriver
-                chromedriver_path = find_chromedriver()
-                if chromedriver_path:
-                    service = Service(executable_path=chromedriver_path)
-                    driver = webdriver.Chrome(service=service, options=options)
-                else:
-                    # Let Selenium try to find the driver
-                    driver = webdriver.Chrome(options=options)
+                if browser_type == 'chrome':
+                    # Try to find chromedriver
+                    driver_path = find_chrome_binary('chromedriver')
+                    if driver_path:
+                        service = ChromeService(executable_path=driver_path)
+                        driver = webdriver.Chrome(service=service, options=options)
+                    else:
+                        # Let Selenium try to find the driver
+                        driver = webdriver.Chrome(options=options)
+                else:  # Firefox
+                    # Try to find geckodriver
+                    driver_path = find_firefox_binary('geckodriver')
+                    if driver_path:
+                        service = FirefoxService(executable_path=driver_path)
+                        driver = webdriver.Firefox(service=service, options=options)
+                    else:
+                        # Let Selenium try to find the driver
+                        driver = webdriver.Firefox(options=options)
                 
                 # Record process ID if possible to ensure cleanup
                 try:
                     if hasattr(driver.service, 'process') and driver.service.process:
                         process_pid = driver.service.process.pid
+                        logger.debug(f"Browser process ID: {process_pid}")
                 except Exception:
                     pass
                 
@@ -328,7 +344,7 @@ def take_browser_screenshot(url, output_path):
             logger.warning(f"Failed to clean up temp dir: {e}")
         
         # Release semaphore
-        _chrome_semaphore.release()
+        _browser_semaphore.release()
         
         # Additional system-wide cleanup for persistent processes
         if resource_manager:
@@ -343,109 +359,133 @@ def get_browser_configs(temp_dir):
     """Get a list of browser configurations to try in order"""
     configs = []
     
-    # Find Chrome binary
-    chrome_binary = find_chrome_binary()
+    # Find Chrome and Firefox binaries
+    chrome_binary = find_chrome_binary('chrome')
+    firefox_binary = find_firefox_binary('firefox')
     
-    # Configuration 1: Ultra-minimal headless
-    options1 = Options()
-    options1.add_argument("--headless=new")
-    options1.add_argument("--no-sandbox")
-    options1.add_argument("--disable-dev-shm-usage")
-    options1.add_argument("--disable-gpu")
-    options1.add_argument(f"--user-data-dir={temp_dir}")
-    
-    # Disable all extensions and unnecessary features
-    options1.add_argument("--disable-extensions")
-    options1.add_argument("--disable-plugins")
-    options1.add_argument("--disable-software-rasterizer")
-    options1.add_argument("--disable-popup-blocking")
-    options1.add_argument("--disable-default-apps")
-    options1.add_argument("--disable-background-networking")
-    options1.add_argument("--disable-background-timer-throttling")
-    options1.add_argument("--disable-backgrounding-occluded-windows")
-    options1.add_argument("--disable-breakpad")
-    options1.add_argument("--disable-client-side-phishing-detection")
-    options1.add_argument("--disable-component-update")
-    options1.add_argument("--disable-domain-reliability")
-    options1.add_argument("--disable-features=TranslateUI,BlinkGenPropertyTrees,LazyFrameLoading,AutomationControlled")
-    options1.add_argument("--disable-hang-monitor")
-    options1.add_argument("--disable-ipc-flooding-protection")
-    options1.add_argument("--disable-notifications")
-    options1.add_argument("--disable-offer-store-unmasked-wallet-cards")
-    options1.add_argument("--disable-print-preview")
-    options1.add_argument("--disable-prompt-on-repost")
-    options1.add_argument("--disable-renderer-backgrounding")
-    options1.add_argument("--disable-sync")
-    options1.add_argument("--mute-audio")
-    options1.add_argument("--no-pings")
-    options1.add_argument("--no-experiments")
-    options1.add_argument("--no-first-run")
-    options1.add_argument("--no-default-browser-check")
-    
-    # Limit memory usage
-    options1.add_argument("--js-flags=--max-old-space-size=256")
-    options1.add_argument("--memory-pressure-off")
-    options1.add_argument("--force-fieldtrials=*BackgroundTracing/default/")
-    
+    # Configuration 1: Chrome Ultra-minimal headless
     if chrome_binary:
+        options1 = ChromeOptions()
+        options1.add_argument("--headless=new")
+        options1.add_argument("--no-sandbox")
+        options1.add_argument("--disable-dev-shm-usage")
+        options1.add_argument("--disable-gpu")
+        options1.add_argument(f"--user-data-dir={temp_dir}")
+        
+        # Disable all extensions and unnecessary features
+        options1.add_argument("--disable-extensions")
+        options1.add_argument("--disable-plugins")
+        options1.add_argument("--disable-software-rasterizer")
+        options1.add_argument("--disable-popup-blocking")
+        options1.add_argument("--disable-default-apps")
+        options1.add_argument("--disable-background-networking")
+        options1.add_argument("--disable-background-timer-throttling")
+        options1.add_argument("--disable-backgrounding-occluded-windows")
+        options1.add_argument("--disable-breakpad")
+        options1.add_argument("--disable-client-side-phishing-detection")
+        options1.add_argument("--disable-component-update")
+        options1.add_argument("--disable-domain-reliability")
+        options1.add_argument("--disable-features=TranslateUI,BlinkGenPropertyTrees,LazyFrameLoading,AutomationControlled")
+        options1.add_argument("--disable-hang-monitor")
+        options1.add_argument("--disable-ipc-flooding-protection")
+        options1.add_argument("--disable-notifications")
+        options1.add_argument("--disable-offer-store-unmasked-wallet-cards")
+        options1.add_argument("--disable-print-preview")
+        options1.add_argument("--disable-prompt-on-repost")
+        options1.add_argument("--disable-renderer-backgrounding")
+        options1.add_argument("--disable-sync")
+        options1.add_argument("--mute-audio")
+        options1.add_argument("--no-pings")
+        options1.add_argument("--no-experiments")
+        options1.add_argument("--no-first-run")
+        options1.add_argument("--no-default-browser-check")
+        
+        # Limit memory usage
+        options1.add_argument("--js-flags=--max-old-space-size=256")
+        options1.add_argument("--memory-pressure-off")
+        options1.add_argument("--force-fieldtrials=*BackgroundTracing/default/")
+        
         options1.binary_location = chrome_binary
-    configs.append({
-        'name': 'ultra-minimal-headless',
-        'options': options1,
-        'binary': chrome_binary
-    })
+        configs.append({
+            'name': 'chrome-ultra-minimal-headless',
+            'options': options1,
+            'binary': chrome_binary,
+            'type': 'chrome'
+        })
     
-    # Configuration 2: Incognito mode with minimal features
-    options2 = Options()
-    options2.add_argument("--incognito")
-    options2.add_argument("--headless=new")
-    options2.add_argument("--no-sandbox")
-    options2.add_argument("--disable-dev-shm-usage")
-    options2.add_argument(f"--user-data-dir={temp_dir}_2")
+    # Configuration 2: Firefox Headless
+    if firefox_binary:
+        options2 = FirefoxOptions()
+        options2.add_argument("--headless")
+        options2.add_argument("--width=1280")
+        options2.add_argument("--height=800")
+        
+        # Minimize memory usage
+        options2.set_preference("browser.cache.disk.enable", False)
+        options2.set_preference("browser.cache.memory.enable", False)
+        options2.set_preference("browser.cache.offline.enable", False)
+        options2.set_preference("browser.sessionhistory.max_entries", 1)
+        options2.set_preference("browser.sessionhistory.max_total_viewers", 0)
+        options2.set_preference("network.http.use-cache", False)
+        options2.set_preference("browser.sessionstore.interval", 999999999)
+        options2.set_preference("content.notify.interval", 999999999)
+        options2.set_preference("browser.tabs.remote.autostart", False)
+        options2.set_preference("browser.tabs.remote.autostart.2", False)
+        
+        options2.binary = firefox_binary
+        configs.append({
+            'name': 'firefox-headless',
+            'options': options2,
+            'binary': firefox_binary,
+            'type': 'firefox'
+        })
     
-    # Disable all extensions and unnecessary features
-    options2.add_argument("--disable-extensions")
-    options2.add_argument("--disable-plugins")
-    options2.add_argument("--disable-software-rasterizer")
-    options2.add_argument("--disable-popup-blocking")
-    options2.add_argument("--disable-default-apps")
-    options2.add_argument("--disable-background-networking")
-    options2.add_argument("--disable-component-update")
-    options2.add_argument("--disable-domain-reliability")
-    options2.add_argument("--mute-audio")
-    options2.add_argument("--no-first-run")
-    
-    # Limit memory usage
-    options2.add_argument("--js-flags=--max-old-space-size=256")
-    
+    # Configuration 3: Chrome Incognito mode with minimal features
     if chrome_binary:
-        options2.binary_location = chrome_binary
-    configs.append({
-        'name': 'minimal-incognito',
-        'options': options2,
-        'binary': chrome_binary
-    })
-    
-    # Configuration 3: Non-headless with minimal window and features
-    options3 = Options()
-    options3.add_argument("--window-size=800,600")
-    options3.add_argument("--no-sandbox")
-    options3.add_argument(f"--user-data-dir={temp_dir}_3")
-    options3.add_argument("--disable-extensions")
-    options3.add_argument("--disable-plugins")
-    options3.add_argument("--disable-popup-blocking")
-    options3.add_argument("--disable-default-apps")
-    options3.add_argument("--disable-background-networking")
-    options3.add_argument("--mute-audio")
-    options3.add_argument("--no-first-run")
-    
-    if chrome_binary:
+        options3 = ChromeOptions()
+        options3.add_argument("--incognito")
+        options3.add_argument("--headless=new")
+        options3.add_argument("--no-sandbox")
+        options3.add_argument("--disable-dev-shm-usage")
+        options3.add_argument(f"--user-data-dir={temp_dir}_2")
+        
+        # Disable all extensions and unnecessary features
+        options3.add_argument("--disable-extensions")
+        options3.add_argument("--disable-plugins")
+        options3.add_argument("--disable-software-rasterizer")
+        options3.add_argument("--disable-popup-blocking")
+        options3.add_argument("--disable-default-apps")
+        options3.add_argument("--disable-background-networking")
+        options3.add_argument("--disable-component-update")
+        options3.add_argument("--disable-domain-reliability")
+        options3.add_argument("--mute-audio")
+        options3.add_argument("--no-first-run")
+        
+        # Limit memory usage
+        options3.add_argument("--js-flags=--max-old-space-size=256")
+        
         options3.binary_location = chrome_binary
-    configs.append({
-        'name': 'minimal-window',
-        'options': options3,
-        'binary': chrome_binary
-    })
+        configs.append({
+            'name': 'chrome-minimal-incognito',
+            'options': options3,
+            'binary': chrome_binary,
+            'type': 'chrome'
+        })
+    
+    # Configuration 4: Firefox Private mode
+    if firefox_binary:
+        options4 = FirefoxOptions()
+        options4.add_argument("--private")
+        options4.add_argument("--headless")
+        options4.add_argument("--width=800")
+        options4.add_argument("--height=600")
+        options4.binary = firefox_binary
+        configs.append({
+            'name': 'firefox-private',
+            'options': options4,
+            'binary': firefox_binary,
+            'type': 'firefox'
+        })
     
     # Shuffle configurations to avoid all workers trying the same config
     # This distributes the load better across different browser modes
@@ -453,41 +493,79 @@ def get_browser_configs(temp_dir):
     
     return configs
 
-def find_chrome_binary():
-    """Find Chrome or Chromium binary on the system"""
-    possible_paths = [
-        "/usr/bin/chromium-browser",  # Ubuntu/Debian with snap
-        "/usr/bin/chromium",          # Some Linux distros
-        "/snap/bin/chromium",         # Snap installation
-        "/usr/bin/google-chrome",     # Standard Chrome Linux
-        "/usr/bin/google-chrome-stable",
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",  # macOS
-        "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",    # Windows
-        "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"
-    ]
+def find_chrome_binary(binary_name='chrome'):
+    """Find Chrome or related binary on the system
     
-    for path in possible_paths:
-        if os.path.exists(path):
-            logger.info(f"Found Chrome binary at {path}")
-            return path
-            
-    logger.warning("Could not find Chrome binary")
-    return None
-
-def find_chromedriver():
-    """Find chromedriver on the system"""
-    possible_paths = [
-        "/usr/bin/chromedriver",
-        "/usr/local/bin/chromedriver",
-        "/snap/bin/chromedriver"
-    ]
+    Args:
+        binary_name: Name of the binary to find (chrome, chromedriver)
+    
+    Returns:
+        str: Path to the binary or None if not found
+    """
+    possible_paths = []
+    
+    if binary_name == 'chrome':
+        possible_paths = [
+            "/usr/bin/chromium-browser",  # Ubuntu/Debian with snap
+            "/usr/bin/chromium",          # Some Linux distros
+            "/snap/bin/chromium",         # Snap installation
+            "/usr/bin/google-chrome",     # Standard Chrome Linux
+            "/usr/bin/google-chrome-stable",
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",  # macOS
+            "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",    # Windows
+            "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"
+        ]
+    elif binary_name == 'chromedriver':
+        possible_paths = [
+            "/usr/bin/chromedriver",
+            "/usr/local/bin/chromedriver",
+            "/snap/bin/chromedriver",
+            "/home/linuxbrew/.linuxbrew/bin/chromedriver"
+        ]
     
     for path in possible_paths:
         if os.path.exists(path) and os.access(path, os.X_OK):
-            logger.info(f"Found chromedriver at {path}")
+            logger.info(f"Found {binary_name} binary at {path}")
             return path
             
-    logger.warning("Could not find chromedriver")
+    logger.warning(f"Could not find {binary_name} binary")
+    return None
+
+def find_firefox_binary(binary_name='firefox'):
+    """Find Firefox or related binary on the system
+    
+    Args:
+        binary_name: Name of the binary to find (firefox, geckodriver)
+    
+    Returns:
+        str: Path to the binary or None if not found
+    """
+    possible_paths = []
+    
+    if binary_name == 'firefox':
+        possible_paths = [
+            "/usr/bin/firefox",           # Standard Linux
+            "/snap/bin/firefox",          # Snap installation
+            "/usr/lib/firefox/firefox",   # Some Linux distros
+            "/usr/bin/firefox-esr",       # Debian ESR
+            "/Applications/Firefox.app/Contents/MacOS/firefox", # macOS
+            "C:\\Program Files\\Mozilla Firefox\\firefox.exe",  # Windows
+            "C:\\Program Files (x86)\\Mozilla Firefox\\firefox.exe"
+        ]
+    elif binary_name == 'geckodriver':
+        possible_paths = [
+            "/usr/bin/geckodriver",
+            "/usr/local/bin/geckodriver",
+            "/snap/bin/geckodriver",
+            "/home/linuxbrew/.linuxbrew/bin/geckodriver"
+        ]
+    
+    for path in possible_paths:
+        if os.path.exists(path) and os.access(path, os.X_OK):
+            logger.info(f"Found {binary_name} binary at {path}")
+            return path
+            
+    logger.warning(f"Could not find {binary_name} binary")
     return None
 
 def create_fallback_screenshot(url, output_path):

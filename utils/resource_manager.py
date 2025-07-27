@@ -186,7 +186,25 @@ class ResourceManager:
             return 0
             
         count = 0
-        browser_names = ['chrome', 'chromium', 'firefox', 'geckodriver', 'chromedriver']
+        # Expanded list of browser-related process names to cover all browsers
+        browser_names = [
+            # Chrome and variants
+            'chrome', 'chromium', 'chromedriver', 
+            # Firefox and variants
+            'firefox', 'firefox-bin', 'geckodriver', 'firefox-esr',
+            # Safari
+            'safari', 'safaridriver', 'webkit', 
+            # Edge
+            'edge', 'msedge', 'msedgedriver', 
+            # Opera
+            'opera', 'operadriver',
+            # PhantomJS
+            'phantomjs',
+            # Selenium
+            'selenium', 'selenium-server',
+            # Webdriver related
+            'webdriver', 'webdriveragent'
+        ]
         
         for proc in psutil.process_iter(['pid', 'name', 'username', 'cmdline']):
             try:
@@ -202,6 +220,12 @@ class ResourceManager:
                 if not is_browser and proc.info.get('cmdline'):
                     cmdline = ' '.join(proc.info['cmdline']).lower()
                     if any(browser in cmdline for browser in browser_names):
+                        is_browser = True
+                    
+                    # Also check for web driver specific arguments
+                    browser_args = ['--headless', '--remote-debugging-port', 
+                                  'webdriver', 'marionette', '--disable-extensions']
+                    if any(arg in cmdline for arg in browser_args):
                         is_browser = True
                 
                 if is_browser:
@@ -229,9 +253,16 @@ class ResourceManager:
         temp_dir = tempfile.gettempdir()
         count = 0
         
-        # Look for directories matching our temporary dir pattern
+        # Look for directories matching browser temp patterns
+        browser_patterns = [
+            'chrome_', 'firefox_', 'gecko_', 'edge_', 'opera_', 'safari_',
+            'selenium', 'webdriver', '.org.chromium.Chromium',
+            'scoped_dir', 'tmp_browser_', '_MEI', '.com.google.Chrome',
+            'mozilla_', '.cache', 'MozillaMailbox'
+        ]
+        
         for item in os.listdir(temp_dir):
-            if item.startswith(('chrome_', 'firefox_')):
+            if any(pattern in item for pattern in browser_patterns):
                 full_path = os.path.join(temp_dir, item)
                 try:
                     if os.path.isdir(full_path):
