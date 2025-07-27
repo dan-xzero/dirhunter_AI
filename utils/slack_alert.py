@@ -483,30 +483,38 @@ def send_simple_slack_message(webhook_url, title, message, link=None, link_text=
     Parameters:
     - webhook_url: The Slack webhook URL
     - title: The message title (bold)
-    - message: The message body
+    - message: The message body (supports Slack markdown)
     - link: Optional URL to include
     - link_text: Text for the link button
     """
     if not webhook_url or webhook_url.lower() == "none":
         return False
         
-    blocks = [
-        {
+    # For DirHunter messages, we want to use markdown formatting
+    blocks = []
+    
+    # Only add header if title is not included in the message
+    if title and ":white_check_mark:" not in message[:50] and ":mag:" not in message[:50]:
+        blocks.append({
             "type": "header",
             "text": {
                 "type": "plain_text",
                 "text": title,
                 "emoji": True
             }
-        },
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": message
-            }
-        }
-    ]
+        })
+    
+    # Split message by double newline to create separate text blocks
+    message_parts = message.split("\n\n")
+    for part in message_parts:
+        if part.strip():
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": part
+                }
+            })
     
     # Add link button if provided
     if link and link_text:
@@ -520,13 +528,15 @@ def send_simple_slack_message(webhook_url, title, message, link=None, link_text=
                         "text": link_text,
                         "emoji": True
                     },
-                    "url": link
+                    "url": link,
+                    "style": "primary"
                 }
             ]
         })
     
     payload = {
-        "blocks": blocks
+        "blocks": blocks,
+        "text": title  # Fallback text
     }
     
     try:

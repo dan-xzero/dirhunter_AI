@@ -62,21 +62,25 @@ if resource_manager:
     except Exception:
         pass
 
-def initialize_screenshot_system(max_workers=2):
-    """Initialize the screenshot system with the specified concurrency"""
+def initialize_screenshot_system(max_workers=1):
+    """Initialize the screenshot system with sequential processing
+    
+    Args:
+        max_workers: Number of browser instances (should be 1 for sequential processing)
+    """
     global _MAX_WORKERS, _browser_semaphore
     
-    # Update max workers
-    _MAX_WORKERS = max_workers
+    # Always use 1 worker for sequential processing
+    _MAX_WORKERS = 1
     
-    # Create new semaphore
-    _browser_semaphore = threading.Semaphore(_MAX_WORKERS)
+    # Create new semaphore that allows only one browser at a time
+    _browser_semaphore = threading.Semaphore(1)
     
     # Start resource monitoring if available
     if resource_manager:
         resource_manager.start_monitoring()
         
-    logger.info(f"Screenshot system initialized with {_MAX_WORKERS} workers")
+    logger.info("Screenshot system initialized for sequential processing")
     
     # Clean up any leftover browser processes or temp files
     clean_browser_environment()
@@ -732,21 +736,21 @@ def filter_screenshot_tasks(findings):
     return unique_findings
 
 def take_screenshots_parallel(task_list, max_workers=3):
-    """Take multiple screenshots in parallel with progressive loading
+    """Take screenshots sequentially with priority-based processing
     
-    This optimized version:
+    This version:
     1. Prioritizes important screenshots first
-    2. Uses resource-aware throttling
-    3. Cleans up browser processes between batches
+    2. Takes screenshots one at a time to reduce resource usage
+    3. Cleans up the browser after each screenshot
     """
     # Initialize the screenshot system
-    initialize_screenshot_system(max_workers=max_workers)
+    initialize_screenshot_system(max_workers=1)  # Set to 1 since we're processing sequentially
     
     # If task list is empty, nothing to do
     if not task_list:
         return
         
-    logger.info(f"Taking {len(task_list)} screenshots with {max_workers} workers")
+    logger.info(f"Taking {len(task_list)} screenshots sequentially")
     
     # Process high priority screenshots first
     high_priority_tasks = [task for task in task_list 
@@ -772,37 +776,30 @@ def take_screenshots_parallel(task_list, max_workers=3):
             
         logger.info(f"Processing {len(batch_tasks)} {batch_name} screenshots")
         
-        # Aggressive cleanup before each batch
+        # Aggressive cleanup before each priority batch
         clean_browser_environment()
         
-        # Add small delay between batch starts to allow cleanup to complete
-        if batch_idx > 0:
-            time.sleep(2)
+        # Process each task in this batch sequentially
+        batch_completed = 0
         
-        # Process batch with appropriate concurrency
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all tasks for this batch
-            future_to_task = {
-                executor.submit(take_screenshot, 
-                               task['url'], 
-                               task['output_path'],
-                               task.get('priority', 'normal')): task
-                for task in batch_tasks
-            }
-            
-            # Process as completed
-            batch_completed = 0
-            for future in concurrent.futures.as_completed(future_to_task):
-                task = future_to_task[future]
-                try:
-                    success = future.result()
-                    if success:
-                        logger.info(f"✓ Screenshot for {task['url']}")
-                    else:
-                        logger.warning(f"✗ Failed screenshot for {task['url']}")
-                except Exception as e:
-                    logger.error(f"Error in screenshot task: {e}")
+        for task in batch_tasks:
+            try:
+                # Take screenshot for this URL
+                logger.info(f"Taking screenshot for {task['url']}")
+                success = take_screenshot(
+                    task['url'], 
+                    task['output_path'],
+                    task.get('priority', 'normal')
+                )
+                
+                # Log result
+                if success:
+                    logger.info(f"✓ Screenshot for {task['url']}")
+                else:
+                    logger.warning(f"✗ Failed screenshot for {task['url']}")
+                    
+                # Clean up after each screenshot
+                clean_browser_environment()
                 
                 # Update progress
                 batch_completed += 1
@@ -814,33 +811,16 @@ def take_screenshots_parallel(task_list, max_workers=3):
                 if total_completed % 10 == 0 or total_completed == total_tasks:
                     logger.info(f"Overall progress: {total_completed}/{total_tasks}")
                     
-                # Occasional process cleanup even within a batch
-                if batch_completed % max(10, len(batch_tasks) // 3) == 0:
-                    if resource_manager:
-                        try:
-                            resource_manager.kill_browser_processes(timeout_seconds=1)
-                        except Exception:
-                            pass
-        
+                # Small delay between screenshots to ensure complete cleanup
+                time.sleep(0.5)
+                
+            except Exception as e:
+                logger.error(f"Error in screenshot task for {task['url']}: {e}")
+                
         # Thorough cleanup after each batch
         clean_browser_environment()
         
-        if resource_manager:
-            try:
-                # More aggressive cleanup after a batch is completed
-                resource_manager.kill_browser_processes(timeout_seconds=3)
-                resource_manager.clean_temporary_dirs()
-                
-                # If this is the last batch, do a final cleanup
-                if batch_idx == len(all_batches) - 1 or total_completed == total_tasks:
-                    logger.info("Performing final browser process cleanup")
-                    # Give a moment for any lingering processes to finish
-                    time.sleep(1)
-                    resource_manager.kill_browser_processes(timeout_seconds=5)
-            except Exception as e:
-                logger.warning(f"Error during batch cleanup: {e}")
-                
-    # Final cleanup to ensure no processes remain
+    # Final cleanup after all screenshots
     logger.info("Screenshot tasks completed, performing final cleanup")
     clean_browser_environment()
 

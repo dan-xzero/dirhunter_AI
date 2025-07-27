@@ -59,7 +59,7 @@ def parse_args():
     parser.add_argument("--wordlist", type=str, help="Path to wordlist file")
     parser.add_argument("--ignore-hash", action="store_true", help="Show all findings including existing ones")
     parser.add_argument("--reset-db", action="store_true", help="Reset the hash database")
-    parser.add_argument("--screenshot-workers", type=int, default=3, help="Number of parallel screenshot workers (default: 3)")
+    parser.add_argument("--screenshot-workers", type=int, default=1, help="[DEPRECATED] Screenshots are now taken sequentially")
     parser.add_argument("--retry-rate-limits", action="store_true", help="Retry previously rate-limited paths")
     parser.add_argument("--parallel-domains", type=int, default=3, help="Number of domains to scan in parallel (default: 3)")
     parser.add_argument("--no-critical-alerts", action="store_true", help="Disable real-time critical alerts")
@@ -310,17 +310,15 @@ def process_domains_parallel(domains_with_wordlists, args, shared_results):
     
     # Throttle based on resources
     if resource_manager:
-        recommended_domains, recommended_shots = resource_manager.get_recommended_concurrency()
+        recommended_domains = resource_manager.get_recommended_concurrency()[0]
         
         # Update args if auto-scaling is enabled
         if not args.disable_resource_optimization:
             if args.parallel_domains > recommended_domains:
                 logger.warning(f"Reducing parallel domains from {args.parallel_domains} to {recommended_domains} based on system resources")
                 args.parallel_domains = recommended_domains
-                
-            if args.screenshot_workers > recommended_shots:
-                logger.warning(f"Reducing screenshot workers from {args.screenshot_workers} to {recommended_shots} based on system resources")
-                args.screenshot_workers = recommended_shots
+            
+            # No need to adjust screenshot workers as we're now using sequential processing
     
     # Clean up browser environment before starting
     try:
@@ -450,16 +448,14 @@ def main():
         resource_manager.start_monitoring()
         
         # Get recommended concurrency
-        recommended_domains, recommended_shots = resource_manager.get_recommended_concurrency()
+        recommended_domains = resource_manager.get_recommended_concurrency()[0]
         
         # Auto-adjust concurrency settings
         if args.parallel_domains > recommended_domains:
             logger.warning(f"Reducing --parallel-domains from {args.parallel_domains} to {recommended_domains} based on system resources")
             args.parallel_domains = recommended_domains
-            
-        if args.screenshot_workers > recommended_shots:
-            logger.warning(f"Reducing --screenshot-workers from {args.screenshot_workers} to {recommended_shots} based on system resources")
-            args.screenshot_workers = recommended_shots
+        
+        # No need to adjust screenshot workers as we're using sequential processing
     
     # Initialize database
     init_db()
@@ -535,8 +531,38 @@ def main():
             create_enhanced_dashboard({}, enhanced_dashboard_path)
         except Exception as e:
             logger.warning(f"Initial enhanced dashboard creation failed: {e}")
-    except Exception:
-        pass
+            
+        # Get server hostname for dashboard URL
+        # Use REPORT_BASE_URL for dashboard URL
+        REPORT_BASE_URL = os.getenv("REPORT_BASE_URL")
+        if REPORT_BASE_URL:
+            dashboard_url = f"{REPORT_BASE_URL}/reports/dashboard.html"
+        else:
+            # Fallback to local IP if REPORT_BASE_URL not set
+            hostname = socket.gethostname()
+            ip_address = socket.gethostbyname(hostname)
+            dashboard_url = f"http://{ip_address}/results/html/dashboard.html"
+        
+        # Send start scan notification to Slack
+        if WEBHOOK_URL and WEBHOOK_URL.lower() != "none":
+            total_domains = len(domains_with_wordlists)
+            start_message = (
+                f":mag: *DirHunter AI Scan Started*\n"
+                f"• Domains to scan: {total_domains}\n"
+                f"• Parallel domains: {args.parallel_domains}\n"
+                f"• Screenshot workers: {args.screenshot_workers}\n"
+            )
+            
+            from utils.slack_alert import send_simple_slack_message
+            send_simple_slack_message(
+                WEBHOOK_URL,
+                "DirHunter AI Scan Started",
+                start_message,
+                dashboard_url,
+                "View Live Dashboard"
+            )
+    except Exception as e:
+        logger.warning(f"Initial setup error: {e}")
     
     # Start performance tracking
     perf = PerformanceTracker()
@@ -581,11 +607,137 @@ def main():
     # Send Slack summary (if webhook is set)
     if WEBHOOK_URL and results:
         try:
-            send_consolidated_slack_alert(results)
+            # Calculate key statistics
+            total_domains = len(results)
+            total_findings = sum(len(findings) for findings in results.values())
+            new_findings = sum(sum(1 for f in fs if f.get('finding_status') == 'new') for fs in results.values())
+            changed_findings = sum(sum(1 for f in fs if f.get('finding_status') == 'changed') for fs in results.values())
+            scan_duration = time.time() - start_time
             
-            # Enhanced Slack report - removed as requested
-        except Exception:
-            pass
+            # Get high priority findings
+            high_priority_findings = []
+            from utils.ai_analyzer import get_category_priority
+            
+            for domain, findings_list in results.items():
+                for finding in findings_list:
+                    tag = finding.get('ai_tag', 'Unknown')
+                    priority = get_category_priority(tag)
+                    if priority >= 8:  # High priority
+                        finding_entry = {
+                            'domain': domain,
+                            'url': finding.get('url', ''),
+                            'path': finding.get('path', ''),
+                            'tag': tag,
+                            'status': finding.get('finding_status', 'unknown')
+                        }
+                        high_priority_findings.append(finding_entry)
+            
+            # Sort by domain
+            high_priority_findings.sort(key=lambda x: (x['domain'], x['tag'], x['url']))
+            
+            # Generate domain stats
+            domain_stats = []
+            for domain, findings in results.items():
+                domain_new = sum(1 for f in findings if f.get('finding_status') == 'new')
+                domain_changed = sum(1 for f in findings if f.get('finding_status') == 'changed')
+                domain_stats.append({
+                    'domain': domain, 
+                    'new': domain_new, 
+                    'changed': domain_changed,
+                    'total': len(findings)
+                })
+            
+            # Count findings by category
+            categories = defaultdict(int)
+            for domain, findings_list in results.items():
+                for finding in findings_list:
+                    tag = finding.get('ai_tag', 'Other')
+                    categories[tag] += 1
+            
+            # Sort categories by count
+            sorted_categories = sorted(categories.items(), key=lambda x: x[1], reverse=True)[:5]
+            
+            # Build Slack message
+            completion_message = (
+                f":white_check_mark: *DirHunter AI Scan Completed*\n"
+                f"Scan completed for {total_domains} domain{'s' if total_domains > 1 else ''}\n"
+                f"• Total findings: {total_findings}\n"
+                f"• New findings: {new_findings}\n"
+                f"• Changed findings: {changed_findings}\n"
+                f"• Scan duration: {scan_duration:.2f} seconds\n\n"
+            )
+            
+            # Add security scan timestamp section
+            scan_timestamp = datetime.now().strftime("%b %d, %Y at %H:%M")
+            completion_message += (
+                f":mag: *Security Scan Complete - {scan_timestamp}*\n"
+                f":bar_chart: *Overall Statistics*\n"
+                f"• Domains scanned: {total_domains}\n"
+                f"• Total findings: {total_findings}\n"
+            )
+            
+            # Add attention section if there are new findings
+            if new_findings > 0:
+                completion_message += (
+                    f":rotating_light: *Attention Required*\n"
+                    f"• :new: New findings: {new_findings}\n"
+                )
+            
+            # Add high priority findings section
+            if high_priority_findings:
+                completion_message += f"\n:fire: *High Priority Security Findings*\n"
+                completion_message += ":large_orange_circle: *HIGH:*\n"
+                
+                # Limit to 5 findings to keep message size reasonable
+                shown_findings = min(5, len(high_priority_findings))
+                for i in range(shown_findings):
+                    finding = high_priority_findings[i]
+                    status_icon = ":new:" if finding['status'] == 'new' else ":arrows_counterclockwise:" if finding['status'] == 'changed' else ""
+                    completion_message += f"• {status_icon} {finding['domain']} - [{finding['tag']}]\n"
+                    completion_message += f" └─ {finding['url']}\n"
+                
+                # Add note about remaining findings
+                if len(high_priority_findings) > shown_findings:
+                    completion_message += f" ...and {len(high_priority_findings) - shown_findings} more high priority findings\n"
+            
+            # Add domain breakdown
+            if len(domain_stats) > 0:
+                completion_message += "\n:globe_with_meridians: *Domain Breakdown*\n"
+                for domain in domain_stats:
+                    completion_message += f"{domain['domain']}\n"
+                    if domain['new'] > 0:
+                        completion_message += f" :bell: New: {domain['new']}\n"
+                    completion_message += f" :page_facing_up: View Detailed Report\n"
+            
+            # Add dashboard link
+            completion_message += (
+                f":dart: *View Complete Security Dashboard*\n"
+                f"Access detailed reports, screenshots, and analysis:\n"
+                f":stopwatch: Scan completed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC | :robot_face: Powered by DirHunter AI"
+            )
+            
+            # Get dashboard URL
+            REPORT_BASE_URL = os.getenv("REPORT_BASE_URL")
+            if REPORT_BASE_URL:
+                dashboard_url = f"{REPORT_BASE_URL}/reports/dashboard.html"
+            else:
+                # Fallback to local IP
+                hostname = socket.gethostname()
+                ip_address = socket.gethostbyname(hostname)
+                dashboard_url = f"http://{ip_address}/results/html/dashboard.html"
+            
+            # Send the message
+            from utils.slack_alert import send_simple_slack_message
+            send_simple_slack_message(
+                WEBHOOK_URL,
+                "DirHunter AI Scan Completed",
+                completion_message,
+                dashboard_url,
+                "View Dashboard"
+            )
+            
+        except Exception as e:
+            logger.warning(f"Slack alert failed: {e}")
     elif not WEBHOOK_URL:
         logger.warning("WEBHOOK_URL not set. Skipping Slack alert.")
     elif not results:

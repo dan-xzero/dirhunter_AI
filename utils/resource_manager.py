@@ -148,29 +148,25 @@ class ResourceManager:
         return not self.paused.wait(timeout=timeout)
 
     @staticmethod
-    def get_recommended_concurrency() -> Tuple[int, int]:
-        """Get recommended concurrency values based on system resources
+    def get_recommended_concurrency() -> int:
+        """Get recommended domain concurrency based on system resources
         
         Returns:
-            Tuple[int, int]: (recommended_domains, recommended_screenshot_workers)
+            int: recommended_domains
         """
         if not PSUTIL_AVAILABLE:
             # Conservative defaults if psutil not available
-            return (2, 2)
+            return 2
             
         # Get system information
         cpu_count = psutil.cpu_count(logical=False) or psutil.cpu_count() or 2
-        mem_gb = psutil.virtual_memory().total / (1024 ** 3)
         
         # Calculate recommended values
         # Use physical cores if available, otherwise logical cores
         recommended_domains = max(1, min(cpu_count // 2, 3))
         
-        # Scale screenshot workers based on memory (1 worker per 2GB, max 3)
-        recommended_shots = max(1, min(int(mem_gb // 2), 3))
-        
-        logger.info(f"Recommended concurrency: {recommended_domains} domains, {recommended_shots} screenshot workers")
-        return (recommended_domains, recommended_shots)
+        logger.info(f"Recommended domain concurrency: {recommended_domains}")
+        return recommended_domains
 
     @staticmethod
     def kill_browser_processes(timeout_seconds: float = 5.0) -> int:
