@@ -258,6 +258,14 @@ def take_screenshot(url, output_path, priority="normal"):
 
 def take_browser_screenshot(url, output_path):
     """Take a screenshot using a browser (Selenium) with minimal resource usage"""
+    # Import os directly into this function's scope to ensure availability
+    import os
+    import signal
+    import time
+    import tempfile
+    import uuid
+    import shutil
+    
     if not _SELENIUM_AVAILABLE:
         logger.info(f"Selenium not available - using fallback for {url}")
         return create_fallback_screenshot(url, output_path)
@@ -433,8 +441,7 @@ def take_browser_screenshot(url, output_path):
         # Try to kill the process directly if we have the PID
         if process_pid:
             try:
-                import signal
-                import os
+                # We already imported os and signal at the top of the function
                 try:
                     os.kill(process_pid, signal.SIGTERM)
                     logger.debug(f"Sent SIGTERM to browser process {process_pid}")
