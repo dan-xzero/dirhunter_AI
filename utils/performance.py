@@ -17,6 +17,31 @@ class PerformanceTracker:
         self.errors = {}
         self.start_time = time.time()
     
+    def add_metrics(self, metrics_dict):
+        """Add metrics from a dictionary of domain performance metrics
+        
+        Args:
+            metrics_dict: Dictionary where keys are domain names and values
+                         are dictionaries of metrics
+        """
+        for domain, metrics in metrics_dict.items():
+            if 'scan_time' in metrics:
+                self.scan_times[domain] = metrics['scan_time']
+            if 'filter_time' in metrics:
+                self.filter_times[domain] = metrics['filter_time']
+            if 'screenshot_time' in metrics:
+                self.screenshot_times[domain] = metrics['screenshot_time']
+            if 'classification_time' in metrics:
+                self.classification_times[domain] = metrics['classification_time']
+            if 'total_time' in metrics:
+                self.total_times[domain] = metrics['total_time']
+            if 'findings_count' in metrics:
+                self.findings_count[domain] = metrics['findings_count']
+            if 'rate_limits' in metrics:
+                self.rate_limits[domain] = metrics['rate_limits']
+            if 'error' in metrics:
+                self.errors[domain] = metrics['error']
+    
     def record_scan_time(self, domain, duration):
         """Record FFUF scan time for a domain"""
         self.scan_times[domain] = duration
