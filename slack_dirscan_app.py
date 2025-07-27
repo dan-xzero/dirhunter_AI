@@ -129,7 +129,8 @@ def run_scan_async(domains, args, response_url, base_url):
     result = subprocess.call(cmd, shell=True)
 
     # Prepare follow-up message
-    dashboard_url = f"{base_url}/reports/dashboard.html"
+    REPORT_BASE_URL = os.getenv("REPORT_BASE_URL", base_url)
+    dashboard_url = f"{REPORT_BASE_URL}/reports/dashboard.html"
     
     if result == 0:
         followup_message = {

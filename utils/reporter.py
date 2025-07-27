@@ -43,9 +43,13 @@ def _slugify_name(value: str) -> str:
     value = re.sub(r"_+", "_", value).strip("_")
     return value or "item"
 
-def create_dashboard(all_domains_data):
+def create_dashboard(all_domains_data, is_update=False):
     """
     Create a main dashboard that shows all domains and their findings
+    
+    Parameters:
+    - all_domains_data: Dictionary mapping domains to their findings
+    - is_update: If True, indicates this is an update to an existing dashboard
     """
     os.makedirs(HTML_REPORT_DIR, exist_ok=True)
     
@@ -107,6 +111,7 @@ def create_dashboard(all_domains_data):
         <title>DirHunter AI - Security Dashboard</title>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta http-equiv="refresh" content="60">
         <style>
             body {{
                 font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -147,426 +152,483 @@ def create_dashboard(all_domains_data):
                 padding: 1.5rem;
                 border-radius: 12px;
                 box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-                transition: transform 0.2s, box-shadow 0.2s;
+                text-align: center;
             }}
-            .stat-card:hover {{
-                transform: translateY(-2px);
-                box-shadow: 0 4px 12px rgba(0,0,0,0.12);
-            }}
-            .stat-card h3 {{
-                margin: 0 0 0.5rem 0;
-                color: #6b7280;
-                font-size: 0.875rem;
-                font-weight: 500;
-                text-transform: uppercase;
-                letter-spacing: 0.05em;
-            }}
-            .stat-card .value {{
+            .stat-card h2 {{
+                margin: 0;
                 font-size: 2.5rem;
                 font-weight: 700;
-                color: #1d1d1f;
-                margin: 0;
+                color: #4f46e5;
             }}
-            .stat-card.new {{ 
-                border-left: 4px solid #10b981; 
-                background: linear-gradient(to right, rgba(16, 185, 129, 0.05), white);
+            .stat-card p {{
+                margin: 0.5rem 0 0 0;
+                color: #6b7280;
+                font-size: 1rem;
             }}
-            .stat-card.changed {{ 
-                border-left: 4px solid #f59e0b; 
-                background: linear-gradient(to right, rgba(245, 158, 11, 0.05), white);
+            .domain-grid {{
+                display: grid;
+                grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+                gap: 1.5rem;
+                margin-bottom: 2rem;
             }}
-            .stat-card.total {{ 
-                border-left: 4px solid #6366f1; 
-                background: linear-gradient(to right, rgba(99, 102, 241, 0.05), white);
-            }}
-            .stat-card.existing {{
-                border-left: 4px solid #6b7280;
-                background: linear-gradient(to right, rgba(107, 114, 128, 0.05), white);
-            }}
-            .stat-card.secrets {{
-                border-left: 4px solid #be123c;
-                background: linear-gradient(to right, rgba(190, 18, 60, 0.05), white);
-            }}
-            .stat-card.cves {{
-                border-left: 4px solid #b91c1c;
-                background: linear-gradient(to right, rgba(185, 28, 28, 0.05), white);
-            }}
-            
-            .section {{
+            .domain-card {{
                 background: white;
                 border-radius: 12px;
-                padding: 2rem;
-                margin-bottom: 2rem;
+                overflow: hidden;
                 box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+                transition: transform 0.2s;
             }}
-            .section h2 {{
-                margin: 0 0 1.5rem 0;
-                font-size: 1.5rem;
-                font-weight: 600;
-                color: #1d1d1f;
+            .domain-card:hover {{
+                transform: translateY(-4px);
+                box-shadow: 0 8px 16px rgba(0,0,0,0.12);
             }}
-            
-            .priority-grid {{
-                display: grid;
-                gap: 1rem;
-            }}
-            .priority-item {{
+            .domain-card .header {{
+                padding: 1.5rem;
                 background: #f9fafb;
-                padding: 1rem;
-                border-radius: 8px;
-                border: 1px solid #e5e7eb;
-                display: flex;
-                align-items: center;
-                gap: 1rem;
-                transition: background 0.2s;
+                border-bottom: 1px solid #e5e7eb;
             }}
-            .priority-item:hover {{
-                background: #f3f4f6;
-            }}
-            .priority-item img {{
-                width: 80px;
-                height: 60px;
-                object-fit: cover;
-                border-radius: 4px;
-                border: 1px solid #e5e7eb;
-            }}
-            .priority-item .details {{
-                flex: 1;
-            }}
-            .priority-item .domain {{
+            .domain-card .header h3 {{
+                margin: 0;
+                font-size: 1.25rem;
                 font-weight: 600;
-                color: #6366f1;
-                font-size: 0.875rem;
+                color: #111827;
             }}
-            .priority-item .url {{
-                font-family: 'Courier New', monospace;
-                font-size: 0.875rem;
-                color: #4b5563;
-                word-break: break-all;
-                margin: 0.25rem 0;
+            .domain-card .content {{
+                padding: 1.5rem;
             }}
-            .priority-item .tags {{
+            .domain-card .stats {{
                 display: flex;
-                gap: 0.5rem;
-                flex-wrap: wrap;
+                justify-content: space-between;
+                margin-bottom: 1rem;
             }}
-            .tag {{
-                display: inline-block;
+            .domain-card .stat {{
+                text-align: center;
+            }}
+            .domain-card .stat .value {{
+                font-size: 1.5rem;
+                font-weight: 700;
+                color: #4f46e5;
+            }}
+            .domain-card .stat .label {{
+                font-size: 0.875rem;
+                color: #6b7280;
+            }}
+            .domain-card .tags {{
+                display: flex;
+                flex-wrap: wrap;
+                gap: 0.5rem;
+                margin-bottom: 1rem;
+            }}
+            .domain-card .tag {{
+                background: #f3f4f6;
+                color: #4b5563;
                 padding: 0.25rem 0.75rem;
                 border-radius: 9999px;
                 font-size: 0.75rem;
                 font-weight: 500;
             }}
-            .tag.critical {{ background: #fee2e2; color: #dc2626; }}
-            .tag.high {{ background: #fef3c7; color: #d97706; }}
-            .tag.medium {{ background: #dbeafe; color: #2563eb; }}
-            .tag.new {{ background: #d1fae5; color: #059669; }}
-            .tag.changed {{ background: #fed7aa; color: #ea580c; }}
-            
-            .domains-table {{
+            .domain-card .view-btn {{
+                display: block;
                 width: 100%;
-                border-collapse: collapse;
-            }}
-            .domains-table th {{
-                text-align: left;
-                padding: 0.75rem 1rem;
-                border-bottom: 2px solid #e5e7eb;
-                font-weight: 600;
-                color: #6b7280;
-                font-size: 0.875rem;
-            }}
-            .domains-table td {{
-                padding: 1rem;
-                border-bottom: 1px solid #f3f4f6;
-            }}
-            .domains-table tr:hover {{
-                background: #f9fafb;
-            }}
-            .domains-table a {{
-                color: #6366f1;
+                padding: 0.75rem;
+                background: #4f46e5;
+                color: white;
+                text-align: center;
                 text-decoration: none;
+                border-radius: 6px;
+                font-weight: 500;
+                transition: background-color 0.2s;
+            }}
+            .domain-card .view-btn:hover {{
+                background: #4338ca;
+            }}
+            .priority-section {{
+                background: white;
+                border-radius: 12px;
+                padding: 1.5rem;
+                margin-bottom: 2rem;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            }}
+            .priority-section h2 {{
+                margin-top: 0;
+                margin-bottom: 1.5rem;
+                font-size: 1.5rem;
+                font-weight: 600;
+                color: #111827;
+            }}
+            .priority-grid {{
+                display: grid;
+                grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+                gap: 1.5rem;
+            }}
+            .priority-card {{
+                background: #f9fafb;
+                border-radius: 8px;
+                overflow: hidden;
+                border-left: 4px solid #4f46e5;
+            }}
+            .priority-card .thumbnail {{
+                width: 100%;
+                height: 180px;
+                object-fit: cover;
+                background: #e5e7eb;
+            }}
+            .priority-card .content {{
+                padding: 1rem;
+            }}
+            .priority-card h3 {{
+                margin: 0 0 0.5rem 0;
+                font-size: 1rem;
                 font-weight: 500;
             }}
-            .domains-table a:hover {{
-                text-decoration: underline;
-            }}
-            
-            .category-chart {{
-                display: flex;
-                gap: 1rem;
-                align-items: center;
-                margin-bottom: 1rem;
-            }}
-            .category-chart .bar {{
-                flex: 1;
-                background: #e5e7eb;
-                height: 24px;
-                border-radius: 4px;
-                overflow: hidden;
-                position: relative;
-            }}
-            .category-chart .fill {{
-                height: 100%;
-                background: #6366f1;
-                transition: width 0.3s;
-            }}
-            .category-chart .label {{
-                min-width: 150px;
+            .priority-card p {{
+                margin: 0;
                 font-size: 0.875rem;
-            }}
-            .category-chart .count {{
-                min-width: 50px;
-                text-align: right;
-                font-weight: 600;
-            }}
-            
-            .timestamp {{
-                text-align: center;
                 color: #6b7280;
-                font-size: 0.875rem;
-                margin-top: 2rem;
             }}
-
-            /* Filter controls */
-            .filters {{
-                display:flex;
-                gap:0.75rem;
-                flex-wrap:wrap;
-                margin:1rem 0 1.5rem;
-                align-items:center;
+            .priority-card .meta {{
+                display: flex;
+                justify-content: space-between;
+                margin-top: 0.75rem;
+                font-size: 0.75rem;
             }}
-            .filters input {{
-                flex:1 1 220px;
-                padding:0.5rem 0.75rem;
-                border:1px solid #d1d5db;
-                border-radius:6px;
-                font-size:0.9rem;
+            .priority-card .domain {{
+                color: #6b7280;
+            }}
+            .priority-card .priority {{
+                font-weight: 500;
+                color: #4f46e5;
+            }}
+            .priority-card .priority.high {{
+                color: #dc2626;
+            }}
+            .status-badge {{
+                display: inline-block;
+                padding: 0.25rem 0.5rem;
+                border-radius: 9999px;
+                font-size: 0.75rem;
+                font-weight: 500;
+                text-transform: uppercase;
+            }}
+            .status-new {{
+                background: #dcfce7;
+                color: #166534;
+            }}
+            .status-changed {{
+                background: #fef3c7;
+                color: #92400e;
+            }}
+            .status-existing {{
+                background: #e0e7ff;
+                color: #3730a3;
+            }}
+            .status-unknown {{
+                background: #f3f4f6;
+                color: #4b5563;
+            }}
+            .search-box {{
+                width: 100%;
+                padding: 1rem;
+                margin-bottom: 2rem;
+                border: 1px solid #e5e7eb;
+                border-radius: 8px;
+                font-size: 1rem;
+                background: white;
+            }}
+            .filter-bar {{
+                display: flex;
+                gap: 0.5rem;
+                margin-bottom: 2rem;
+                flex-wrap: wrap;
             }}
             .filter-btn {{
-                padding:0.4rem 0.9rem;
-                background:#e5e7eb;
-                border:none;
-                border-radius:6px;
-                cursor:pointer;
-                font-size:0.8rem;
+                padding: 0.5rem 1rem;
+                background: #f3f4f6;
+                border: none;
+                border-radius: 6px;
+                font-size: 0.875rem;
+                font-weight: 500;
+                color: #4b5563;
+                cursor: pointer;
+                transition: all 0.2s;
+            }}
+            .filter-btn:hover {{
+                background: #e5e7eb;
             }}
             .filter-btn.active {{
-                background:#6366f1;
-                color:#fff;
+                background: #4f46e5;
+                color: white;
             }}
-            .hidden {{ display:none !important; }}
+            .last-updated {{
+                text-align: center;
+                margin-top: 2rem;
+                color: #6b7280;
+                font-size: 0.875rem;
+            }}
+            .scan-status {{
+                background: #fef3c7;
+                color: #92400e;
+                padding: 0.75rem;
+                border-radius: 6px;
+                margin-bottom: 1.5rem;
+                text-align: center;
+                font-weight: 500;
+            }}
+            .scan-status.completed {{
+                background: #dcfce7;
+                color: #166534;
+            }}
+            .domain-card .status-indicator {{
+                display: inline-block;
+                width: 10px;
+                height: 10px;
+                border-radius: 50%;
+                margin-right: 0.5rem;
+            }}
+            .domain-card .status-indicator.completed {{
+                background: #22c55e;
+            }}
+            .domain-card .status-indicator.scanning {{
+                background: #f59e0b;
+            }}
+            .domain-card .status-text {{
+                font-size: 0.75rem;
+                color: #6b7280;
+                display: flex;
+                align-items: center;
+                margin-top: 0.5rem;
+            }}
         </style>
     </head>
     <body>
         <div class="header">
             <div class="container">
-                <h1>🔍 DirHunter AI Security Dashboard</h1>
-                <div class="subtitle">Comprehensive vulnerability discovery and analysis</div>
-                {spark_svg}
+                <h1>DirHunter AI - Security Dashboard</h1>
+                <div class="subtitle">
+                    Automated Directory Scanning & Security Analysis
+                </div>
             </div>
         </div>
         
         <div class="container">
-            <!-- Statistics Cards -->
+            <div class="scan-status{' completed' if not is_update else ''}">
+                {f"Scan completed - {total_domains} domains analyzed" if not is_update else f"Scan in progress - {total_domains} domains processed so far"}
+            </div>
+            
             <div class="stats-grid">
-                <div class="stat-card total">
-                    <h3>Total Domains</h3>
-                    <p class="value">{total_domains}</p>
+                <div class="stat-card">
+                    <h2>{total_domains}</h2>
+                    <p>Domains Scanned</p>
                 </div>
-                <div class="stat-card total">
-                    <h3>Total Findings</h3>
-                    <p class="value">{total_findings}</p>
+                <div class="stat-card">
+                    <h2>{total_findings}</h2>
+                    <p>Total Findings</p>
                 </div>
-                <div class="stat-card new">
-                    <h3>🆕 New Findings</h3>
-                    <p class="value">{global_status_counts.get('new', 0)}</p>
+                <div class="stat-card">
+                    <h2>{global_status_counts.get('new', 0)}</h2>
+                    <p>New Findings</p>
                 </div>
-                <div class="stat-card changed">
-                    <h3>🔄 Changed Findings</h3>
-                    <p class="value">{global_status_counts.get('changed', 0)}</p>
+                <div class="stat-card">
+                    <h2>{global_cve_total}</h2>
+                    <p>CVE Vulnerabilities</p>
                 </div>
-                <div class="stat-card existing">
-                    <h3>✅ Existing Findings</h3>
-                    <p class="value">{global_status_counts.get('existing', 0)}</p>
-                </div>
-                <div class="stat-card secrets">
-                    <h3>🕵️ Secrets</h3>
-                    <p class="value">{global_secret_count}</p>
-                </div>
-                <div class="stat-card cves">
-                    <h3>⚠️ CVEs</h3>
-                    <p class="value">{global_cve_total}</p>
+                <div class="stat-card">
+                    <h2>{global_secret_count}</h2>
+                    <p>Potential Secrets</p>
                 </div>
             </div>
             
-            <!-- High Priority Findings -->
-            <div class="section">
-                <h2>🚨 High Priority Security Findings</h2>
+            <input type="text" class="search-box" id="searchInput" placeholder="Search domains...">
+            
+            <div class="filter-bar">
+                <button class="filter-btn active" data-filter="all">All Domains</button>
+                <button class="filter-btn" data-filter="new-findings">New Findings</button>
+                <button class="filter-btn" data-filter="with-cves">With CVEs</button>
+                <button class="filter-btn" data-filter="with-secrets">With Secrets</button>
+            </div>
+            
+            <div class="domain-grid" id="domainGrid">
+    """
+    
+    # Add domain cards
+    for domain, findings in all_domains_data.items():
+        if not findings:
+            continue
+            
+        # Calculate domain stats
+        total_domain_findings = len(findings)
+        new_findings = sum(1 for f in findings if f.get('finding_status') == 'new')
+        changed_findings = sum(1 for f in findings if f.get('finding_status') == 'changed')
+        
+        # Get domain tags
+        domain_tags = set()
+        for f in findings:
+            tag = f.get('ai_tag', 'Other')
+            if tag != 'Other' and len(domain_tags) < 5:  # Limit to 5 tags
+                domain_tags.add(tag)
+        
+        # Count CVEs and secrets
+        domain_cve_count = 0
+        domain_secret_count = 0
+        for f in findings:
+            # Count CVEs
+            tech_info = f.get('tech_info', {})
+            if tech_info:
+                cves = tech_info.get('cves', [])
+                domain_cve_count += len(cves)
+            
+            # Count secrets
+            dm = f.get('download_meta') or {}
+            secret_cnt = len(dm.get('th_secrets', [])) + len(dm.get('potential_secrets', []))
+            domain_secret_count += secret_cnt
+        
+        # Create slug for linking
+        dom_slug = _slugify_name(domain)
+        
+        html += f"""
+                <div class="domain-card" 
+                    data-domain="{domain}" 
+                    data-new-findings="{new_findings}" 
+                    data-cves="{domain_cve_count}" 
+                    data-secrets="{domain_secret_count}">
+                    <div class="header">
+                        <h3>{domain}</h3>
+                        <div class="status-text">
+                            <span class="status-indicator completed"></span>
+                            Scan completed
+                        </div>
+                    </div>
+                    <div class="content">
+                        <div class="stats">
+                            <div class="stat">
+                                <div class="value">{total_domain_findings}</div>
+                                <div class="label">Findings</div>
+                            </div>
+                            <div class="stat">
+                                <div class="value">{new_findings}</div>
+                                <div class="label">New</div>
+                            </div>
+                            <div class="stat">
+                                <div class="value">{domain_cve_count}</div>
+                                <div class="label">CVEs</div>
+                            </div>
+                            <div class="stat">
+                                <div class="value">{domain_secret_count}</div>
+                                <div class="label">Secrets</div>
+                            </div>
+                        </div>
+                        <div class="tags">
+        """
+        
+        # Add tags
+        for tag in domain_tags:
+            html += f'<span class="tag">{tag}</span>'
+            
+        html += f"""
+                        </div>
+                        <a href="{dom_slug}_tags.html" class="view-btn">View Details</a>
+                    </div>
+                </div>
+        """
+    
+    # Close domain grid and add high priority findings section
+    html += """
+            </div>
+            
+            <div class="priority-section">
+                <h2>High Priority Findings</h2>
                 <div class="priority-grid">
     """
     
     # Add high priority findings
-    for finding in high_priority_findings[:20]:  # Show top 20
-        screenshot_html = ""
+    for i, finding in enumerate(high_priority_findings):
+        if i >= 6:  # Limit to 6 cards
+            break
+            
+        screenshot = ""
         if finding['screenshot'] and os.path.exists(finding['screenshot']):
-            screenshot_rel = os.path.relpath(finding['screenshot'], HTML_REPORT_DIR)
-            screenshot_html = f'<img src="{screenshot_rel}" alt="Screenshot">'
+            screenshot = f'<img src="{os.path.relpath(finding["screenshot"], HTML_REPORT_DIR)}" class="thumbnail" alt="{finding["category"]}">'
+            
+        priority_class = "high" if finding['priority'] >= 9 else ""
         
-        status_tag = "new" if finding['status'] == 'new' else "changed" if finding['status'] == 'changed' else ""
-        priority_tag = "critical" if finding['priority'] >= 9 else "high" if finding['priority'] >= 7 else "medium"
-        
+        status_class = "status-unknown"
+        if finding['status'] == 'new':
+            status_class = "status-new"
+        elif finding['status'] == 'changed':
+            status_class = "status-changed"
+        elif finding['status'] == 'existing':
+            status_class = "status-existing"
+            
         html += f"""
-                    <div class="priority-item">
-                        {screenshot_html}
-                        <div class="details">
-                            <div class="domain">{finding['domain']}</div>
-                            <div class="url">{finding['url']}</div>
-                            <div class="tags">
-                                <span class="tag {priority_tag}">{finding['category']}</span>
-                                {f'<span class="tag {status_tag}">{finding["status"].upper()}</span>' if status_tag else ''}
-                            </div>
+                <div class="priority-card">
+                    {screenshot}
+                    <div class="content">
+                        <h3>{finding['category']}</h3>
+                        <p>{finding['url']}</p>
+                        <div class="meta">
+                            <span class="domain">{finding['domain']}</span>
+                            <span class="status-badge {status_class}">{finding['status']}</span>
+                            <span class="priority {priority_class}">Priority: {finding['priority']}/10</span>
                         </div>
                     </div>
+                </div>
         """
     
+    # Close priority section and add last updated info
     html += """
                 </div>
             </div>
             
-            <!-- Category Distribution -->
-            <div class="section">
-                <h2>📊 Finding Categories</h2>
-    """
-    
-    # Add category chart
-    sorted_categories = sorted(global_category_counts.items(), key=lambda x: -x[1])
-    max_count = max(global_category_counts.values()) if global_category_counts else 1
-    
-    for category, count in sorted_categories[:10]:  # Top 10 categories
-        percentage = (count / max_count) * 100
-        html += f"""
-                <div class="category-chart">
-                    <div class="label">{category}</div>
-                    <div class="bar">
-                        <div class="fill" style="width: {percentage}%"></div>
-                    </div>
-                    <div class="count">{count}</div>
-                </div>
-        """
-    
-    html += """
-            </div>
-            
-            <!-- Domain Summary Table -->
-            <div class="section">
-                <h2>🌐 Domain Summary</h2>
-                <div class="filters">
-                    <input id="domainSearch" placeholder="🔍 Search domain..." />
-                    <button class="filter-btn active" data-filter="all">All</button>
-                    <button class="filter-btn" data-filter="new">New</button>
-                    <button class="filter-btn" data-filter="changed">Changed</button>
-                    <button class="filter-btn" data-filter="existing">Existing</button>
-                    <button class="filter-btn" data-filter="secrets">Secrets</button>
-                    <button class="filter-btn" data-filter="cves">CVEs</button>
-                </div>
-                <table class="domains-table">
-                    <thead>
-                        <tr>
-                            <th>Domain</th>
-                            <th>Total</th>
-                            <th>New</th>
-                            <th>Changed</th>
-                            <th>High Priority</th>
-                            <th>Secrets</th>
-                            <th>CVEs</th>
-                            <th>Report</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-    """
-    
-    # Compliance-style reports removed – only technical reports remain
-    # Add domain rows
-    for domain in sorted(all_domains_data.keys()):
-        findings = all_domains_data[domain]
-        new_count = sum(1 for f in findings if f.get('finding_status') == 'new')
-        changed_count = sum(1 for f in findings if f.get('finding_status') == 'changed')
-        high_priority_count = sum(1 for f in findings if get_category_priority(f.get('ai_tag', 'Other')) >= 7)
-        
-        # Secrets count per domain
-        secret_count = sum((len((f.get('download_meta') or {}).get('th_secrets', [])) +
-                           len((f.get('download_meta') or {}).get('potential_secrets', []))) for f in findings if f and f.get('download_meta'))
-        cve_count    = aggregate_cves(findings)["total"]
-        existing_count = len(findings) - new_count - changed_count
-
-        dom_slug = _slugify_name(domain)
-        html += f"""
-                        <tr data-domain="{domain}" data-new="{new_count}" data-changed="{changed_count}" data-existing="{existing_count}" data-secrets="{secret_count}" data-cves="{cve_count}">
-                            <td><strong>{domain}</strong></td>
-                            <td>{len(findings)}</td>
-                            <td>{new_count}</td>
-                            <td>{changed_count}</td>
-                            <td>{high_priority_count}</td>
-                            <td>{secret_count}</td>
-                            <td>{cve_count}</td>
-                            <td><a href="{dom_slug}_tags.html">View</a></td>
-                        </tr>
-        """
-    
-    html += f"""
-                    </tbody>
-                </table>
-            </div>
-            
-            <div class="timestamp">
-                Generated on {datetime.now().strftime('%Y-%m-%d at %H:%M:%S UTC')} – adaptive rate control active
+            <div class="last-updated">
+                Last updated: """ + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + """
             </div>
         </div>
+        
         <script>
-        (function() {{
-            const searchInput = document.getElementById('domainSearch');
-            const filterBtns  = document.querySelectorAll('.filter-btn');
-            let currentFilter = 'all';
+            (function() {
+                const searchInput = document.getElementById('searchInput');
+                const domainGrid = document.getElementById('domainGrid');
+                const domainCards = domainGrid.querySelectorAll('.domain-card');
+                const filterBtns = document.querySelectorAll('.filter-btn');
+                
+                let currentFilter = 'all';
+                
+                function applyFilters() {
+                    const searchTerm = searchInput.value.toLowerCase();
+                    
+                    domainCards.forEach(card => {
+                        const domain = card.dataset.domain.toLowerCase();
+                        let show = domain.includes(searchTerm);
+                        
+                        // Apply category filter
+                        if (show && currentFilter !== 'all') {
+                            switch(currentFilter) {
+                                case 'new-findings':
+                                    show = parseInt(card.dataset.newFindings) > 0;
+                                    break;
+                                case 'with-cves':
+                                    show = parseInt(card.dataset.cves) > 0;
+                                    break;
+                                case 'with-secrets':
+                                    show = parseInt(card.dataset.secrets) > 0;
+                                    break;
+                            }
+                        }
+                        
+                        card.style.display = show ? '' : 'none';
+                    });
+                }
 
-            function applyFilters() {{
-                const q = (searchInput.value || '').toLowerCase();
-                document.querySelectorAll('.domains-table tbody tr').forEach(row => {{
-                    const domain    = row.dataset.domain.toLowerCase();
-                    const newCnt    = parseInt(row.dataset.new);
-                    const chgCnt    = parseInt(row.dataset.changed);
-                    const existCnt  = parseInt(row.dataset.existing);
-                    const secCnt    = parseInt(row.dataset.secrets);
-                    const cvesCnt   = parseInt(row.dataset.cves);
-
-                    let passesFilter = false;
-                    switch(currentFilter) {{
-                        case 'all':      passesFilter = true; break;
-                        case 'new':      passesFilter = newCnt   > 0; break;
-                        case 'changed':  passesFilter = chgCnt   > 0; break;
-                        case 'existing': passesFilter = existCnt > 0; break;
-                        case 'secrets':  passesFilter = secCnt   > 0; break;
-                        case 'cves':     passesFilter = cvesCnt  > 0; break;
-                    }}
-
-                    const matchesSearch = q === '' || domain.includes(q);
-                    if(passesFilter && matchesSearch) {{
-                        row.classList.remove('hidden');
-                    }} else {{
-                        row.classList.add('hidden');
-                    }}
-                }});
-            }}
-
-            searchInput.addEventListener('input', applyFilters);
-            filterBtns.forEach(btn => {{
-                btn.addEventListener('click', () => {{
-                    filterBtns.forEach(b => b.classList.remove('active'));
-                    btn.classList.add('active');
-                    currentFilter = btn.dataset.filter;
-                    applyFilters();
-                }});
-            }});
-        }})();
+                searchInput.addEventListener('input', applyFilters);
+                filterBtns.forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        filterBtns.forEach(b => b.classList.remove('active'));
+                        btn.classList.add('active');
+                        currentFilter = btn.dataset.filter;
+                        applyFilters();
+                    });
+                });
+            })();
         </script>
     </body>
     </html>
@@ -576,7 +638,7 @@ def create_dashboard(all_domains_data):
     with open(dashboard_file, "w", encoding="utf-8") as f:
         f.write(html)
     
-    print(f"[+] Dashboard created: {dashboard_file}")
+    print(f"[+] Dashboard {'updated' if is_update else 'created'}: {dashboard_file}")
     return dashboard_file
 
 

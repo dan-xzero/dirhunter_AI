@@ -105,8 +105,13 @@ def aggregate_domain_tech(findings: List[Dict]) -> Dict[str, Any]:
     
     return dict(tech_stack)
 
-def create_enhanced_dashboard(all_domains_data):
-    """Create an enhanced dashboard with better visualizations"""
+def create_enhanced_dashboard(all_domains_data, is_update=False):
+    """Create an enhanced dashboard with better visualizations
+    
+    Parameters:
+    - all_domains_data: Dictionary mapping domains to their findings
+    - is_update: If True, indicates this is an update to an existing dashboard
+    """
     os.makedirs(HTML_REPORT_DIR, exist_ok=True)
     
     dashboard_file = os.path.join(HTML_REPORT_DIR, "dashboard.html")
@@ -127,7 +132,7 @@ def create_enhanced_dashboard(all_domains_data):
         domain_tech = aggregate_domain_tech(findings)
         domain_cves = defaultdict(list)
         domain_secrets = defaultdict(int)
-        risk_score = 0
+        domain_risk_score = 0  # Initialize risk score
         
         for finding in findings:
             status = finding.get('finding_status', 'unknown')
@@ -146,9 +151,13 @@ def create_enhanced_dashboard(all_domains_data):
                 global_secret_types[secret_info['type']] += 1
                 domain_secrets[secret_info['type']] += 1
                 
-                # Add to risk score
-                risk_multiplier = {'critical': 10, 'high': 5, 'medium': 2, 'low': 1}
-                risk_score += risk_multiplier.get(secret_info['risk'], 1)
+                # Add to risk score based on secret risk
+                if secret_info['risk'] == 'critical':
+                    domain_risk_score += 10
+                elif secret_info['risk'] == 'high':
+                    domain_risk_score += 5
+                else:
+                    domain_risk_score += 2
             
             # Process CVEs
             tech_dict = finding.get('tech') or {}
@@ -161,16 +170,22 @@ def create_enhanced_dashboard(all_domains_data):
                     severity = severity_from_count(cve_count)
                     global_cve_severity[severity] += 1
                     
-                    # Add to risk score
-                    severity_multiplier = {'Critical': 8, 'High': 4, 'Medium': 2, 'Low': 1}
-                    risk_score += severity_multiplier.get(severity, 1) * cve_count
-        
-        domain_risk_scores[domain] = {
-            'score': risk_score,
-            'tech_stack': domain_tech,
-            'cve_summary': dict(domain_cves),
-            'secret_types': dict(domain_secrets)
-        }
+                    # Add to risk score based on CVE severity
+                    if severity == 'Critical':
+                        domain_risk_score += 8 * cve_count
+                    elif severity == 'High':
+                        domain_risk_score += 4 * cve_count
+                    elif severity == 'Medium':
+                        domain_risk_score += 2 * cve_count
+                    else:
+                        domain_risk_score += cve_count
+            
+            domain_risk_scores[domain] = {
+                'tech_stack': domain_tech,
+                'cve_summary': dict(domain_cves),
+                'secret_types': dict(domain_secrets),
+                'score': domain_risk_score  # Add the calculated risk score
+            }
     
     # Build enhanced HTML
     html = f"""
@@ -292,6 +307,51 @@ def create_enhanced_dashboard(all_domains_data):
                 background: linear-gradient(90deg, #10b981 0%, #f59e0b 50%, #ef4444 100%);
                 transition: width 0.5s ease;
             }}
+            .cve-summary {
+                display: grid;
+                grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+                gap: 1rem;
+                margin-top: 1rem;
+            }
+            .cve-item {
+                padding: 1rem;
+                border-radius: 8px;
+                border: 1px solid #e5e7eb;
+            }
+            .cve-item h4 {
+                margin-top: 0;
+                margin-bottom: 0.5rem;
+            }
+            .cve-item.cve-severity-critical {
+                background-color: #fee2e2;
+                border-left: 4px solid #ef4444;
+            }
+            .cve-item.cve-severity-high {
+                background-color: #fed7aa;
+                border-left: 4px solid #f97316;
+            }
+            .cve-item.cve-severity-medium {
+                background-color: #fef3c7;
+                border-left: 4px solid #f59e0b;
+            }
+            .cve-item.cve-severity-low {
+                background-color: #dbeafe;
+                border-left: 4px solid #3b82f6;
+            }
+            .cve-list {
+                margin-top: 0.5rem;
+                padding-left: 1.5rem;
+            }
+            .cve-list li {
+                margin-bottom: 0.25rem;
+            }
+            .cve-list a {
+                color: #4f46e5;
+                text-decoration: none;
+            }
+            .cve-list a:hover {
+                text-decoration: underline;
+            }
         </style>
     </head>
     <body>
@@ -373,6 +433,44 @@ def create_enhanced_dashboard(all_domains_data):
         html += """
                 </div>
         """
+        
+        # Add CVE summary if any
+        if risk_data['cve_summary']:
+            html += """
+                <h3>🩹 CVE Vulnerabilities</h3>
+                <div class="cve-summary">
+            """
+            
+            for pkg, cves in risk_data['cve_summary'].items():
+                cve_count = len(cves)
+                severity = severity_from_count(cve_count)
+                severity_class = severity.lower()
+                
+                html += f"""
+                    <div class="cve-item cve-severity-{severity_class}">
+                        <h4>{pkg}</h4>
+                        <p>Severity: <strong>{severity}</strong> ({cve_count} vulnerabilities)</p>
+                        <ul class="cve-list">
+                """
+                
+                for cve_id in cves[:5]:  # Limit to 5 CVEs to avoid huge lists
+                    html += f"""
+                            <li><a href="https://nvd.nist.gov/vuln/detail/{cve_id}" target="_blank">{cve_id}</a></li>
+                    """
+                
+                if len(cves) > 5:
+                    html += f"""
+                            <li>... and {len(cves) - 5} more</li>
+                    """
+                
+                html += """
+                        </ul>
+                    </div>
+                """
+            
+            html += """
+                </div>
+            """
         
         # Add secrets summary if any
         if risk_data['secret_types']:

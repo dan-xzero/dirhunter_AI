@@ -362,8 +362,8 @@ def send_critical_alert(domain, critical_findings, webhook_url):
     blocks.append({"type": "divider"})
     
     if REPORT_BASE_URL:
-        dashboard_url = f"{REPORT_BASE_URL}/dashboard.html"
-        domain_report_url = f"{REPORT_BASE_URL}/{domain}_tags.html"
+        dashboard_url = f"{REPORT_BASE_URL}/reports/dashboard.html"
+        domain_report_url = f"{REPORT_BASE_URL}/reports/{domain}_tags.html"
         
         blocks.append({
             "type": "actions",
@@ -475,3 +475,63 @@ def send_rate_limit_alert(rate_limit_summary, webhook_url):
             print(f"[+] Rate limit alert sent")
     except Exception as e:
         print(f"[!] Failed to send rate limit alert: {e}")
+
+def send_simple_slack_message(webhook_url, title, message, link=None, link_text=None):
+    """
+    Send a simple Slack message with optional link
+    
+    Parameters:
+    - webhook_url: The Slack webhook URL
+    - title: The message title (bold)
+    - message: The message body
+    - link: Optional URL to include
+    - link_text: Text for the link button
+    """
+    if not webhook_url or webhook_url.lower() == "none":
+        return False
+        
+    blocks = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": title,
+                "emoji": True
+            }
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": message
+            }
+        }
+    ]
+    
+    # Add link button if provided
+    if link and link_text:
+        blocks.append({
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": link_text,
+                        "emoji": True
+                    },
+                    "url": link
+                }
+            ]
+        })
+    
+    payload = {
+        "blocks": blocks
+    }
+    
+    try:
+        response = requests.post(webhook_url, json=payload)
+        return response.status_code == 200
+    except Exception as e:
+        print(f"Error sending Slack message: {e}")
+        return False

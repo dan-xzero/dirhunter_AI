@@ -8,7 +8,7 @@ from utils.scanner import run_ffuf, retry_rate_limited_paths
 from utils.filters import filter_false_positives
 from utils.screenshot import take_screenshots_parallel, filter_screenshot_tasks
 from utils.ai_analyzer import classify_screenshot_with_gpt, batch_classify_screenshots
-from utils.slack_alert import send_consolidated_slack_alert, send_rate_limit_alert, send_critical_alert
+from utils.slack_alert import send_consolidated_slack_alert, send_rate_limit_alert, send_critical_alert, send_simple_slack_message
 from utils.reporter import export_tag_based_reports, create_dashboard
 from utils.enhanced_reporter import create_enhanced_dashboard
 from utils.enhanced_slack import send_enhanced_slack_alert
@@ -23,6 +23,7 @@ import multiprocessing
 import queue
 import threading
 import time
+import socket
 from datetime import datetime
 import psutil  # NEW: for auto-scaling
 
@@ -252,9 +253,25 @@ def process_domain_optimized(domain, wordlist, ignore_hash, screenshot_workers, 
         perf_metrics['error'] = str(e)
         return None, perf_metrics
 
+# ──────────── SHARED RESULTS DICTIONARY ────────────
+class SharedResults:
+    """Thread-safe shared results container for updating the dashboard"""
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.results = {}
+    
+    def update(self, domain, findings):
+        with self.lock:
+            if findings:
+                self.results[domain] = findings
+    
+    def get_all(self):
+        with self.lock:
+            return dict(self.results)
+
 # ──────────── PARALLEL DOMAIN PROCESSOR ────────────
-def process_domains_parallel(domains_with_wordlists, args):
-    """Process multiple domains in parallel"""
+def process_domains_parallel(domains_with_wordlists, args, shared_results):
+    """Process multiple domains in parallel with dashboard updates"""
     all_results = {}
     perf_data = {}
     
@@ -290,6 +307,15 @@ def process_domains_parallel(domains_with_wordlists, args):
                 results, perf_metrics = future.result()
                 if results:
                     all_results[domain] = results
+                    # Update shared results and refresh dashboard
+                    shared_results.update(domain, results)
+                    # Update dashboard with current results
+                    create_dashboard(shared_results.get_all(), is_update=True)
+                    # Update enhanced dashboard too
+                    try:
+                        create_enhanced_dashboard(shared_results.get_all(), is_update=True)
+                    except Exception as e:
+                        logger.warning(f"Enhanced dashboard update failed: {e}")
                 perf_data[domain] = perf_metrics
                 logger.info(f"Progress: {completed}/{total} domains completed")
             except Exception as e:
@@ -415,9 +441,53 @@ def main():
             logger.error("No valid domains to scan after DNS validation.")
             sys.exit(1)
     
+    # Create shared results container
+    shared_results = SharedResults()
+    
+    # Create initial empty dashboard
+    logger.info("Creating initial dashboard...")
+    dashboard_path = create_dashboard({}, is_update=True)
+    
+    # Create initial empty enhanced dashboard
+    try:
+        logger.info("Creating initial enhanced dashboard...")
+        enhanced_dashboard_path = create_enhanced_dashboard({}, is_update=True)
+    except Exception as e:
+        logger.warning(f"Initial enhanced dashboard creation failed: {e}")
+        enhanced_dashboard_path = None
+    
+    # Get server hostname for dashboard URL
+    # Use REPORT_BASE_URL for dashboard URL
+    REPORT_BASE_URL = os.getenv("REPORT_BASE_URL")
+    if REPORT_BASE_URL:
+        dashboard_url = f"{REPORT_BASE_URL}/reports/dashboard.html"
+    else:
+        # Fallback to local IP if REPORT_BASE_URL not set
+        hostname = socket.gethostname()
+        ip_address = socket.gethostbyname(hostname)
+        dashboard_url = f"http://{ip_address}/results/html/dashboard.html"
+    
+    # Send start scan notification to Slack
+    if WEBHOOK_URL and WEBHOOK_URL.lower() != "none":
+        total_domains = len(domains_with_wordlists)
+        start_message = (
+            f"*Scan started for {total_domains} domains*\n"
+            f"• Parallel domains: {args.parallel_domains}\n"
+            f"• Screenshot workers: {args.screenshot_workers}\n"
+            f"• Fast filter: {'Yes' if args.fast_filter else 'No'}\n"
+            f"• Critical alerts: {'Disabled' if args.no_critical_alerts else 'Enabled'}"
+        )
+        send_simple_slack_message(
+            WEBHOOK_URL,
+            "🚀 DirHunter AI Scan Started",
+            start_message,
+            dashboard_url,
+            "View Live Dashboard"
+        )
+    
     # Process domains in parallel
     start_time = time.time()
-    all_results, perf_data = process_domains_parallel(domains_with_wordlists, args)
+    all_results, perf_data = process_domains_parallel(domains_with_wordlists, args, shared_results)
     
     # Flush database writes
     db_writer.flush()
@@ -427,10 +497,10 @@ def main():
         logger.info("Retrying rate-limited paths...")
         # TODO: Implement parallel retry logic
     
-    # Create dashboard if we have results
+    # Create final dashboard if we have results
     if all_results:
         dashboard_path = create_dashboard(all_results)
-        logger.info(f"Dashboard created: {dashboard_path}")
+        logger.info(f"Final dashboard created: {dashboard_path}")
         
         # Create enhanced dashboard with visualizations
         try:
@@ -448,9 +518,29 @@ def main():
         except Exception as e:
             logger.warning(f"Run history update failed: {e}")
 
-        # Send daily digest (non-critical findings)
+        # Send completion message to Slack
         if WEBHOOK_URL and WEBHOOK_URL.lower() != "none":
-            # Filter out critical findings that were already sent
+            # Send completion notification
+            total_findings = sum(len(findings) for findings in all_results.values())
+            total_new = sum(sum(1 for f in fs if f.get('finding_status') == 'new') for fs in all_results.values())
+            total_changed = sum(sum(1 for f in fs if f.get('finding_status') == 'changed') for fs in all_results.values())
+            
+            completion_message = (
+                f"*Scan completed for {len(all_results)} domains*\n"
+                f"• Total findings: {total_findings}\n"
+                f"• New findings: {total_new}\n"
+                f"• Changed findings: {total_changed}\n"
+                f"• Scan duration: {time.time() - start_time:.2f} seconds"
+            )
+            send_simple_slack_message(
+                WEBHOOK_URL,
+                "✅ DirHunter AI Scan Completed",
+                completion_message,
+                dashboard_url,
+                "View Dashboard"
+            )
+            
+            # Send standard alert
             non_critical_results = {}
             for domain, findings in all_results.items():
                 non_critical = []
@@ -475,6 +565,16 @@ def main():
             logger.warning("WEBHOOK_URL not set. Skipping Slack alert.")
     else:
         logger.warning("No results found across all domains.")
+        
+        # Send empty results notification to Slack
+        if WEBHOOK_URL and WEBHOOK_URL.lower() != "none":
+            send_simple_slack_message(
+                WEBHOOK_URL,
+                "⚠️ DirHunter AI Scan Completed - No Results",
+                "The scan completed but no results were found across all domains.",
+                None,
+                None
+            )
 
     # Generate performance report
     if args.performance_report:
