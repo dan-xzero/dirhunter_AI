@@ -6,7 +6,7 @@ os.environ['MallocStackLogging'] = '0'
 from dotenv import load_dotenv
 from utils.scanner import run_ffuf, retry_rate_limited_paths
 from utils.filters import filter_false_positives
-from utils.screenshot import take_screenshots_parallel, filter_screenshot_tasks
+from utils.screenshot import take_screenshots_parallel, filter_screenshot_tasks, prioritize_screenshot_tasks, initialize_screenshot_system
 from utils.ai_analyzer import classify_screenshot_with_gpt, batch_classify_screenshots
 from utils.slack_alert import send_consolidated_slack_alert, send_rate_limit_alert, send_critical_alert, send_simple_slack_message
 from utils.reporter import export_tag_based_reports, create_dashboard
@@ -25,7 +25,12 @@ import threading
 import time
 import socket
 from datetime import datetime
-import psutil  # NEW: for auto-scaling
+
+# Import resource manager if available
+try:
+    from utils.resource_manager import resource_manager
+except ImportError:
+    resource_manager = None
 
 load_dotenv(override=True)
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
@@ -54,12 +59,15 @@ def parse_args():
     parser.add_argument("--wordlist", type=str, help="Path to wordlist file")
     parser.add_argument("--ignore-hash", action="store_true", help="Show all findings including existing ones")
     parser.add_argument("--reset-db", action="store_true", help="Reset the hash database")
-    parser.add_argument("--screenshot-workers", type=int, default=5, help="Number of parallel screenshot workers (default: 5)")
+    parser.add_argument("--screenshot-workers", type=int, default=3, help="Number of parallel screenshot workers (default: 3)")
     parser.add_argument("--retry-rate-limits", action="store_true", help="Retry previously rate-limited paths")
-    parser.add_argument("--parallel-domains", type=int, default=5, help="Number of domains to scan in parallel (default: 5)")
+    parser.add_argument("--parallel-domains", type=int, default=3, help="Number of domains to scan in parallel (default: 3)")
     parser.add_argument("--no-critical-alerts", action="store_true", help="Disable real-time critical alerts")
     parser.add_argument("--performance-report", action="store_true", help="Generate performance metrics report")
     parser.add_argument("--fast-filter", action="store_true", help="Skip deep curl/hash checks to speed up filtering")
+    parser.add_argument("--lightweight-screenshots", action="store_true", help="[DISABLED] Always using full browser screenshots as requested")
+    parser.add_argument("--optimize-resources", action="store_true", help="Enable resource optimization (default: enabled)")
+    parser.add_argument("--disable-resource-optimization", action="store_true", help="Disable resource optimization")
     return parser.parse_args()
 
 # ──────────── HELPERS ────────────
@@ -100,16 +108,17 @@ def check_and_send_critical_alerts(domain, findings, no_critical_alerts=False):
     for finding in findings:
         if finding is None:
             continue
-        priority = get_category_priority(finding.get('ai_tag', 'Other'))
+        tag = finding.get('ai_tag', 'Unknown')
+        priority = get_category_priority(tag)
         if priority >= CRITICAL_PRIORITY_THRESHOLD:
             critical_findings.append(finding)
     
     if critical_findings:
         logger.info(f"Found {len(critical_findings)} critical findings for {domain}")
-        send_critical_alert(domain, critical_findings, WEBHOOK_URL)
+        send_critical_alert(domain, critical_findings)
 
 # ──────────── OPTIMIZED DOMAIN PROCESSOR ────────────
-def process_domain_optimized(domain, wordlist, ignore_hash, screenshot_workers, no_critical_alerts=False, fast_filter=False):
+def process_domain_optimized(domain, wordlist, ignore_hash, screenshot_workers, no_critical_alerts=False, fast_filter=False, lightweight_screenshots=False):
     """Optimized domain processing"""
     start_time = time.time()
     perf_metrics = {}
@@ -175,13 +184,36 @@ def process_domain_optimized(domain, wordlist, ignore_hash, screenshot_workers, 
                 shot_path = os.path.join(SCREENSHOT_DIR, domain, safe_filename(entry["path"]) + ".png")
                 entry["screenshot"] = shot_path
                 screenshot_map[entry["url"]] = shot_path
+                
+                # Determine priority for this screenshot
+                # Priority only affects order, not screenshot method
+                priority = "normal"
+                path_lower = entry["path"].lower()
+                
+                # Higher priority for sensitive paths (processed first)
+                sensitive_terms = ['login', 'admin', 'dashboard', 'config', 'setup', 
+                                 'install', 'phpinfo', 'backup', '.git', '.env']
+                if any(term in path_lower for term in sensitive_terms):
+                    priority = "high"
+                
+                # Lower priority for static files (processed last)
+                if any(ext in path_lower for ext in ['.css', '.js', '.png', '.jpg', '.gif']):
+                    priority = "low"
+                
+                # Don't use lightweight mode - user wants full screenshots for all paths
+                # Even with --lightweight-screenshots option set
+                
                 screenshot_tasks.append({
                     "url": entry["url"],
                     "output_path": shot_path,
-                    "screenshot_path": shot_path
+                    "screenshot_path": shot_path,
+                    "priority": priority
                 })
 
-        # Take screenshots in parallel
+        # Initialize screenshot system before starting
+        initialize_screenshot_system(max_workers=screenshot_workers)
+        
+        # Take screenshots in parallel with priority ordering
         screenshot_start = time.time()
         take_screenshots_parallel(screenshot_tasks, max_workers=screenshot_workers)
         
@@ -214,7 +246,7 @@ def process_domain_optimized(domain, wordlist, ignore_hash, screenshot_workers, 
         if classification_tasks:
             classifications = batch_classify_screenshots(classification_tasks, max_workers=3)
             for entry in filtered:
-                if entry["screenshot"] in classifications:
+                if entry.get("screenshot") in classifications:
                     entry["ai_tag"] = classifications[entry["screenshot"]]
                 else:
                     entry["ai_tag"] = "Unknown"
@@ -257,72 +289,112 @@ def process_domain_optimized(domain, wordlist, ignore_hash, screenshot_workers, 
 class SharedResults:
     """Thread-safe shared results container for updating the dashboard"""
     def __init__(self):
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.results = {}
     
     def update(self, domain, findings):
         with self.lock:
-            if findings:
-                self.results[domain] = findings
+            self.results[domain] = findings
     
     def get_all(self):
         with self.lock:
-            return dict(self.results)
+            return self.results.copy()
 
 # ──────────── PARALLEL DOMAIN PROCESSOR ────────────
 def process_domains_parallel(domains_with_wordlists, args, shared_results):
-    """Process multiple domains in parallel with dashboard updates"""
-    all_results = {}
+    """Process multiple domains in parallel with process pool"""
+    results = {}
     perf_data = {}
+    total = len(domains_with_wordlists)
+    completed = 0
     
-    # Use ProcessPoolExecutor for true parallelism
-    max_workers = min(args.parallel_domains, MAX_PARALLEL_DOMAINS, len(domains_with_wordlists))
+    # Throttle based on resources
+    if resource_manager:
+        recommended_domains, recommended_shots = resource_manager.get_recommended_concurrency()
+        
+        # Update args if auto-scaling is enabled
+        if not args.disable_resource_optimization:
+            if args.parallel_domains > recommended_domains:
+                logger.warning(f"Reducing parallel domains from {args.parallel_domains} to {recommended_domains} based on system resources")
+                args.parallel_domains = recommended_domains
+                
+            if args.screenshot_workers > recommended_shots:
+                logger.warning(f"Reducing screenshot workers from {args.screenshot_workers} to {recommended_shots} based on system resources")
+                args.screenshot_workers = recommended_shots
     
+    # Clean up browser environment before starting
+    try:
+        from utils.screenshot import clean_browser_environment
+        clean_browser_environment()
+    except Exception as e:
+        logger.warning(f"Browser environment cleanup failed: {e}")
+    
+    max_workers = min(args.parallel_domains, len(domains_with_wordlists))
     logger.info(f"Starting parallel processing with {max_workers} workers for {len(domains_with_wordlists)} domains")
     
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all domain processing tasks
+        # Submit all tasks
         future_to_domain = {}
         for domain, wordlist in domains_with_wordlists:
             future = executor.submit(
                 process_domain_optimized,
-                domain, 
+                domain,
                 wordlist,
                 args.ignore_hash,
                 args.screenshot_workers,
                 args.no_critical_alerts,
-                args.fast_filter
+                args.fast_filter,
+                args.lightweight_screenshots
             )
             future_to_domain[future] = domain
         
-        # Collect results as they complete
-        completed = 0
-        total = len(domains_with_wordlists)
-        
-        for future in as_completed(future_to_domain):
-            domain = future_to_domain[future]
-            completed += 1
+        # Process as they complete
+        try:
+            # Create initial dashboard early
+            dashboard_path = f"{RAW_RESULTS_DIR}/dashboard.html"
+            create_dashboard(shared_results.get_all(), dashboard_path)
             
-            try:
-                results, perf_metrics = future.result()
-                if results:
-                    all_results[domain] = results
-                    # Update shared results and refresh dashboard
-                    shared_results.update(domain, results)
-                    # Update dashboard with current results
-                    create_dashboard(shared_results.get_all(), is_update=True)
-                    # Update enhanced dashboard too
-                    try:
-                        create_enhanced_dashboard(shared_results.get_all(), is_update=True)
-                    except Exception as e:
-                        logger.warning(f"Enhanced dashboard update failed: {e}")
-                perf_data[domain] = perf_metrics
-                logger.info(f"Progress: {completed}/{total} domains completed")
-            except Exception as e:
-                logger.error(f"Domain {domain} failed: {e}")
-                traceback.print_exc()
+            # Process completed domains
+            for future in as_completed(future_to_domain):
+                domain = future_to_domain[future]
+                try:
+                    findings, metrics = future.result()
+                    
+                    # Store results
+                    if findings:
+                        results[domain] = findings
+                        shared_results.update(domain, findings)
+                        perf_data[domain] = metrics
+                    
+                    # Update dashboard periodically
+                    completed += 1
+                    if completed % 3 == 0 or completed == total:
+                        try:
+                            # Update main dashboard
+                            create_dashboard(shared_results.get_all(), dashboard_path)
+                            
+                            # Try to update enhanced dashboard
+                            try:
+                                enhanced_dashboard_path = f"{RAW_RESULTS_DIR}/enhanced_dashboard.html"
+                                create_enhanced_dashboard(shared_results.get_all(), enhanced_dashboard_path)
+                            except Exception as e:
+                                logger.warning(f"Enhanced dashboard update failed: {e}")
+                        except Exception as e:
+                            pass
+                            
+                    logger.info(f"Progress: {completed}/{total} domains completed")
+                except Exception as e:
+                    logger.error(f"Domain {domain} failed: {e}")
+                    traceback.print_exc()
+        except KeyboardInterrupt:
+            logger.warning("Scan interrupted by user. Saving partial results...")
+            # Handle graceful shutdown
+        
+        # Kill any remaining browser processes
+        if resource_manager:
+            resource_manager.kill_browser_processes()
     
-    return all_results, perf_data
+    return results, perf_data
 
 # ──────────── BATCH DATABASE WRITER ────────────
 class BatchDatabaseWriter:
@@ -373,22 +445,21 @@ def main():
 
     args = parse_args()
 
-    # NEW: Auto-scale concurrency based on hardware
-    try:
-        cpu_count = multiprocessing.cpu_count()
-        mem_gb = psutil.virtual_memory().total // (1024 ** 3)
-
-        recommended_domains = max(1, cpu_count // 2)
+    # Start resource monitoring if available
+    if resource_manager and not args.disable_resource_optimization:
+        resource_manager.start_monitoring()
+        
+        # Get recommended concurrency
+        recommended_domains, recommended_shots = resource_manager.get_recommended_concurrency()
+        
+        # Auto-adjust concurrency settings
         if args.parallel_domains > recommended_domains:
-            logger.warning("Reducing --parallel-domains from %d to %d based on CPU cores", args.parallel_domains, recommended_domains)
+            logger.warning(f"Reducing --parallel-domains from {args.parallel_domains} to {recommended_domains} based on system resources")
             args.parallel_domains = recommended_domains
-
-        recommended_shots = max(1, mem_gb // 4)
+            
         if args.screenshot_workers > recommended_shots:
-            logger.warning("Reducing --screenshot-workers from %d to %d based on available RAM", args.screenshot_workers, recommended_shots)
+            logger.warning(f"Reducing --screenshot-workers from {args.screenshot_workers} to {recommended_shots} based on system resources")
             args.screenshot_workers = recommended_shots
-    except Exception as e:
-        logger.warning("Auto-scaling failed (psutil?): %s", e)
     
     # Initialize database
     init_db()
@@ -417,199 +488,126 @@ def main():
         wordlist = args.wordlist
         domains_with_wordlists = [(domain, wordlist) for domain in domains]
     else:
-        # Default prod/nonprod mode
-        prod_domains = load_domains("domains/prod_domains.txt")
-        nonprod_domains = load_domains("domains/nonprod_domains.txt")
+        # Production vs Non-Production
+        from domains.prod_domains import PROD_DOMAINS
+        from domains.nonprod_domains import NONPROD_DOMAINS
         
-        for domain in prod_domains:
-            domains_with_wordlists.append((domain, "wordlists/wordlist_prod.txt"))
-        
-        for domain in nonprod_domains:
-            domains_with_wordlists.append((domain, "wordlists/wordlist_nonprod.txt"))
-
-    # DNS validation before processing
-    if domains_with_wordlists:
-        # Extract unique domains for DNS check
-        unique_domains = list(set(domain for domain, _ in domains_with_wordlists))
-        valid_domains = pre_scan_dns_check(unique_domains)
-        
-        # Filter domains_with_wordlists to only include valid domains
-        domains_with_wordlists = [(domain, wordlist) for domain, wordlist in domains_with_wordlists 
-                                  if domain in valid_domains]
-        
-        if not domains_with_wordlists:
+        # Skip DNS check for --retry-rate-limits
+        if args.retry_rate_limits:
+            # For retries, use the list of domains with previous rate limits
+            from utils.rate_control import load_rate_limited_domains
+            domains = load_rate_limited_domains()
+            domains_with_wordlists = [(domain, "wordlists/wordlist_prod.txt") for domain in domains]
+        else:
+            # Default: scan prod domains with prod wordlist, nonprod with nonprod wordlist
+            domains_with_wordlists = [
+                (domain, "wordlists/wordlist_prod.txt") for domain in PROD_DOMAINS
+            ] + [
+                (domain, "wordlists/wordlist_nonprod.txt") for domain in NONPROD_DOMAINS
+            ]
+    
+    # Validate domains with DNS lookup (skip for retry mode)
+    if not args.retry_rate_limits:
+        all_domains = [domain for domain, _ in domains_with_wordlists]
+        valid_domains = pre_scan_dns_check(all_domains)
+        if not valid_domains:
             logger.error("No valid domains to scan after DNS validation.")
             sys.exit(1)
+        
+        # Filter out invalid domains
+        domains_with_wordlists = [(domain, wordlist) 
+                                 for domain, wordlist in domains_with_wordlists 
+                                 if domain in valid_domains]
     
     # Create shared results container
     shared_results = SharedResults()
     
-    # Create initial empty dashboard
-    logger.info("Creating initial dashboard...")
-    dashboard_path = create_dashboard({}, is_update=True)
-    
-    # Create initial empty enhanced dashboard
     try:
-        logger.info("Creating initial enhanced dashboard...")
-        enhanced_dashboard_path = create_enhanced_dashboard({}, is_update=True)
-    except Exception as e:
-        logger.warning(f"Initial enhanced dashboard creation failed: {e}")
-        enhanced_dashboard_path = None
+        # Create initial dashboard
+        logger.info("Creating initial dashboard...")
+        dashboard_path = f"{RAW_RESULTS_DIR}/dashboard.html"
+        create_dashboard({}, dashboard_path)
+        
+        # Try to create enhanced dashboard
+        try:
+            enhanced_dashboard_path = f"{RAW_RESULTS_DIR}/enhanced_dashboard.html"
+            logger.info("Creating initial enhanced dashboard...")
+            create_enhanced_dashboard({}, enhanced_dashboard_path)
+        except Exception as e:
+            logger.warning(f"Initial enhanced dashboard creation failed: {e}")
+    except Exception:
+        pass
     
-    # Get server hostname for dashboard URL
-    # Use REPORT_BASE_URL for dashboard URL
-    REPORT_BASE_URL = os.getenv("REPORT_BASE_URL")
-    if REPORT_BASE_URL:
-        dashboard_url = f"{REPORT_BASE_URL}/reports/dashboard.html"
-    else:
-        # Fallback to local IP if REPORT_BASE_URL not set
-        hostname = socket.gethostname()
-        ip_address = socket.gethostbyname(hostname)
-        dashboard_url = f"http://{ip_address}/results/html/dashboard.html"
-    
-    # Send start scan notification to Slack
-    if WEBHOOK_URL and WEBHOOK_URL.lower() != "none":
-        total_domains = len(domains_with_wordlists)
-        start_message = (
-            f"*Scan started for {total_domains} domains*\n"
-            f"• Parallel domains: {args.parallel_domains}\n"
-            f"• Screenshot workers: {args.screenshot_workers}\n"
-            f"• Fast filter: {'Yes' if args.fast_filter else 'No'}\n"
-            f"• Critical alerts: {'Disabled' if args.no_critical_alerts else 'Enabled'}"
-        )
-        send_simple_slack_message(
-            WEBHOOK_URL,
-            "🚀 DirHunter AI Scan Started",
-            start_message,
-            dashboard_url,
-            "View Live Dashboard"
-        )
-    
-    # Process domains in parallel
+    # Start performance tracking
+    perf = PerformanceTracker()
     start_time = time.time()
-    all_results, perf_data = process_domains_parallel(domains_with_wordlists, args, shared_results)
     
-    # Flush database writes
-    db_writer.flush()
-    
-    # Retry rate-limited paths if requested
+    # Process domains
     if args.retry_rate_limits:
+        # Retry mode: only retry previously rate-limited paths
         logger.info("Retrying rate-limited paths...")
-        # TODO: Implement parallel retry logic
+        results = retry_rate_limited_paths()
+    else:
+        # Normal scan mode: process all domains with concurrency
+        results, perf_data = process_domains_parallel(domains_with_wordlists, args, shared_results)
+        perf.add_metrics(perf_data)
     
-    # Create final dashboard if we have results
-    if all_results:
-        dashboard_path = create_dashboard(all_results)
+    # Create final dashboard
+    try:
+        dashboard_path = f"{RAW_RESULTS_DIR}/dashboard.html"
+        create_dashboard(results, dashboard_path)
         logger.info(f"Final dashboard created: {dashboard_path}")
         
-        # Create enhanced dashboard with visualizations
+        # Create enhanced dashboard
         try:
-            enhanced_dashboard_path = create_enhanced_dashboard(all_results)
+            enhanced_dashboard_path = f"{RAW_RESULTS_DIR}/enhanced_dashboard.html"
+            create_enhanced_dashboard(results, enhanced_dashboard_path)
             logger.info(f"Enhanced dashboard created: {enhanced_dashboard_path}")
         except Exception as e:
             logger.warning(f"Enhanced dashboard creation failed: {e}")
-        
-        # Update run history stats for timeline
+            
+        # Add to run history
         try:
-            total_new = sum(sum(1 for f in fs if f.get('finding_status') == 'new') for fs in all_results.values())
-            total_changed = sum(sum(1 for f in fs if f.get('finding_status') == 'changed') for fs in all_results.values())
-            from utils.run_history import record_run
-            record_run(total_domains=len(all_results), new_findings=total_new, changed_findings=total_changed)
+            from utils.run_history import update_run_history
+            update_run_history(results, domains_with_wordlists)
         except Exception as e:
             logger.warning(f"Run history update failed: {e}")
-
-        # Send completion message to Slack
-        if WEBHOOK_URL and WEBHOOK_URL.lower() != "none":
-            # Send completion notification
-            total_findings = sum(len(findings) for findings in all_results.values())
-            total_new = sum(sum(1 for f in fs if f.get('finding_status') == 'new') for fs in all_results.values())
-            total_changed = sum(sum(1 for f in fs if f.get('finding_status') == 'changed') for fs in all_results.values())
+    except Exception:
+        pass
+    
+    # Flush database writer
+    db_writer.flush()
+    
+    # Send Slack summary (if webhook is set)
+    if WEBHOOK_URL and results:
+        try:
+            send_consolidated_slack_alert(results)
             
-            completion_message = (
-                f"*Scan completed for {len(all_results)} domains*\n"
-                f"• Total findings: {total_findings}\n"
-                f"• New findings: {total_new}\n"
-                f"• Changed findings: {total_changed}\n"
-                f"• Scan duration: {time.time() - start_time:.2f} seconds"
-            )
-            send_simple_slack_message(
-                WEBHOOK_URL,
-                "✅ DirHunter AI Scan Completed",
-                completion_message,
-                dashboard_url,
-                "View Dashboard"
-            )
-            
-            # Send standard alert
-            non_critical_results = {}
-            for domain, findings in all_results.items():
-                non_critical = []
-                for finding in findings:
-                    from utils.ai_analyzer import get_category_priority
-                    priority = get_category_priority(finding.get('ai_tag', 'Other'))
-                    if priority < CRITICAL_PRIORITY_THRESHOLD:
-                        non_critical.append(finding)
-                if non_critical:
-                    non_critical_results[domain] = non_critical
-            
-            if non_critical_results:
-                # Send standard alert
-                send_consolidated_slack_alert(non_critical_results, WEBHOOK_URL)
-                
-                # Send enhanced alert with better visualization
-                try:
-                    send_enhanced_slack_alert(WEBHOOK_URL, all_results)
-                except Exception as e:
-                    logger.warning(f"Enhanced Slack alert failed: {e}")
-        else:
-            logger.warning("WEBHOOK_URL not set. Skipping Slack alert.")
-    else:
+            # Enhanced Slack report - removed as requested
+        except Exception:
+            pass
+    elif not WEBHOOK_URL:
+        logger.warning("WEBHOOK_URL not set. Skipping Slack alert.")
+    elif not results:
         logger.warning("No results found across all domains.")
-        
-        # Send empty results notification to Slack
-        if WEBHOOK_URL and WEBHOOK_URL.lower() != "none":
-            send_simple_slack_message(
-                WEBHOOK_URL,
-                "⚠️ DirHunter AI Scan Completed - No Results",
-                "The scan completed but no results were found across all domains.",
-                None,
-                None
-            )
-
-    # Generate performance report
+    
+    # Show performance report if requested
     if args.performance_report:
-        total_time = time.time() - start_time
-        perf_tracker = PerformanceTracker()
-        
-        # Populate performance tracker with collected data
-        for domain, metrics in perf_data.items():
-            if 'scan_time' in metrics:
-                perf_tracker.record_scan_time(domain, metrics['scan_time'])
-            if 'filter_time' in metrics:
-                perf_tracker.record_filter_time(domain, metrics['filter_time'])
-            if 'screenshot_time' in metrics:
-                perf_tracker.record_screenshot_time(domain, metrics['screenshot_time'])
-            if 'classification_time' in metrics:
-                perf_tracker.record_classification_time(domain, metrics['classification_time'])
-            if 'total_time' in metrics:
-                perf_tracker.record_total_time(domain, metrics['total_time'])
-            if 'findings_count' in metrics:
-                perf_tracker.record_findings(domain, metrics['findings_count'])
-            if 'rate_limits' in metrics:
-                perf_tracker.record_rate_limits(domain, metrics['rate_limits'])
-            if 'error' in metrics:
-                perf_tracker.record_error(domain, metrics['error'])
-        
-        perf_report = perf_tracker.generate_report(total_time)
-        logger.info("\n" + perf_report)
-        
-        # Save performance report
-        with open(f"performance_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt", "w") as f:
-            f.write(perf_report)
-
+        perf_report = perf.generate_report()
+        print("\n" + "="*80)
+        print("PERFORMANCE REPORT")
+        print("="*80)
+        print(perf_report)
+    
+    # Stop resource monitoring if it was started
+    if resource_manager:
+        resource_manager.stop_monitoring()
+    
     logger.info(f"All scans completed in {time.time() - start_time:.2f} seconds.")
 
 if __name__ == "__main__":
-    # Set multiprocessing start method
-    multiprocessing.set_start_method('spawn', force=True)
-    main() 
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nScan interrupted by user. Exiting...")
+        sys.exit(0) 

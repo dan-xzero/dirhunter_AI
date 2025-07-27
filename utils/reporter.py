@@ -538,7 +538,9 @@ def create_dashboard(all_domains_data, is_update=False):
             
         html += f"""
                         </div>
-                        <a href="{dom_slug}_tags.html" class="view-btn">View Details</a>
+                        <div class="view-button">
+                            <a href="{dom_slug}_tags.html" class="button">View Details</a>
+                        </div>
                     </div>
                 </div>
         """
@@ -686,6 +688,29 @@ def export_tag_based_reports(domain, findings, output_dir=HTML_REPORT_DIR):
 
     # Ensure parent directories exist for nested domain paths (e.g., "https://...")
     os.makedirs(os.path.dirname(tag_index_file), exist_ok=True)
+    
+    # Calculate finding status counts for this domain
+    new_count = sum(1 for f in findings if f is not None and f.get('finding_status') == 'new')
+    changed_count = sum(1 for f in findings if f is not None and f.get('finding_status') == 'changed')
+    existing_count = sum(1 for f in findings if f is not None and f.get('finding_status') == 'existing')
+    total_count = len([f for f in findings if f is not None])
+    
+    # Calculate CVEs and secrets counts
+    cve_count = 0
+    secret_count = 0
+    
+    for f in findings:
+        if f is None:
+            continue
+            
+        # Count CVEs
+        tech = f.get('tech', {})
+        cve_count += tech.get('cve_vulns', 0)
+        
+        # Count secrets
+        dm = f.get('download_meta', {})
+        if dm:
+            secret_count += len(dm.get('th_secrets', [])) + len(dm.get('potential_secrets', []))
 
     # Enhanced HTML with better styling
     html = f"""
@@ -722,6 +747,37 @@ def export_tag_based_reports(domain, findings, output_dir=HTML_REPORT_DIR):
                 color: #6366f1;
                 text-decoration: none;
             }}
+            .stats-cards {{
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+                gap: 1rem;
+                margin-bottom: 2rem;
+            }}
+            .stat-card {{
+                background: white;
+                padding: 1.5rem;
+                border-radius: 8px;
+                box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+                text-align: center;
+            }}
+            .stat-card h2 {{
+                margin: 0;
+                font-size: 2rem;
+                font-weight: 600;
+            }}
+            .stat-card p {{
+                margin: 0.5rem 0 0;
+                color: #6b7280;
+            }}
+            .new-stat {{
+                color: #ef4444;
+            }}
+            .changed-stat {{
+                color: #f59e0b;
+            }}
+            .existing-stat {{
+                color: #10b981;
+            }}
             #searchBox {{{{
                 width: 100%;
                 padding: 0.75rem 1rem;
@@ -747,61 +803,106 @@ def export_tag_based_reports(domain, findings, output_dir=HTML_REPORT_DIR):
                 border-radius: 12px;
                 overflow: hidden;
                 box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-                transition: transform 0.2s, box-shadow 0.2s;
+                transition: transform 0.2s ease, box-shadow 0.2s ease;
                 cursor: pointer;
+                color: inherit;
+                text-decoration: none;
+                display: block;
             }}
             .tag-card:hover {{
                 transform: translateY(-4px);
-                box-shadow: 0 8px 16px rgba(0,0,0,0.12);
+                box-shadow: 0 10px 15px rgba(0,0,0,0.1);
             }}
             .tag-card .thumbnail {{
+                height: 160px;
+                background-color: #f3f4f6;
+                overflow: hidden;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }}
+            .tag-card .thumbnail img {{
                 width: 100%;
-                height: 180px;
+                height: 100%;
                 object-fit: cover;
-                background: #f3f4f6;
             }}
             .tag-card .content {{
                 padding: 1.5rem;
             }}
             .tag-card h3 {{
-                margin: 0 0 0.5rem 0;
+                margin: 0;
                 font-size: 1.25rem;
                 font-weight: 600;
             }}
             .tag-card .count {{
+                margin-top: 0.5rem;
                 color: #6b7280;
-                font-size: 0.875rem;
             }}
             .tag-card .status-badges {{
-                margin-top: 0.5rem;
+                margin-top: 1rem;
                 display: flex;
+                flex-wrap: wrap;
                 gap: 0.5rem;
             }}
             .badge {{
-                display: inline-block;
-                padding: 0.25rem 0.75rem;
-                border-radius: 9999px;
                 font-size: 0.75rem;
+                padding: 0.25rem 0.5rem;
+                border-radius: 4px;
                 font-weight: 500;
             }}
-            .badge.new {{ background: #d1fae5; color: #059669; }}
-            .badge.changed {{ background: #fed7aa; color: #ea580c; }}
-            .badge.existing {{ background: #e0e7ff; color: #4338ca; }}
-            a {{ text-decoration: none; color: inherit; }}
+            .badge.new {{
+                background-color: #fef2f2;
+                color: #ef4444;
+            }}
+            .badge.changed {{
+                background-color: #fffbeb;
+                color: #f59e0b;
+            }}
+            .badge.existing {{
+                background-color: #ecfdf5;
+                color: #10b981;
+            }}
         </style>
     </head>
     <body>
-        <input id="searchBox" placeholder="🔍 Search findings... (supports URL & tag)" />
         <div class="header">
-            <div class="container">
-                <h1>{domain}</h1>
-                <div class="breadcrumb">
-                    <a href="dashboard.html">← Back to Dashboard</a> / Security Findings by Category
-                </div>
+            <div class="breadcrumb">
+                <a href="dashboard.html">Dashboard</a> &gt; {domain}
             </div>
+            <h1>{domain}</h1>
         </div>
         
         <div class="container">
+            <!-- Domain statistics summary -->
+            <div class="stats-cards">
+                <div class="stat-card">
+                    <h2>{total_count}</h2>
+                    <p>Total Findings</p>
+                </div>
+                <div class="stat-card">
+                    <h2 class="new-stat">{new_count}</h2>
+                    <p>New Findings</p>
+                </div>
+                <div class="stat-card">
+                    <h2 class="changed-stat">{changed_count}</h2>
+                    <p>Changed Findings</p>
+                </div>
+                <div class="stat-card">
+                    <h2 class="existing-stat">{existing_count}</h2>
+                    <p>Existing Findings</p>
+                </div>
+                <div class="stat-card">
+                    <h2>{cve_count}</h2>
+                    <p>Vulnerabilities</p>
+                </div>
+                <div class="stat-card">
+                    <h2>{secret_count}</h2>
+                    <p>Secrets</p>
+                </div>
+            </div>
+            
+            <input type="text" id="searchBox" placeholder="Search findings...">
+            
             <div class="tag-grid">
     """
 

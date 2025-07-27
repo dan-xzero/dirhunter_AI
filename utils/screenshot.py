@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Screenshot Utility - Robust implementation that works in difficult environments
+Screenshot Utility - Optimized implementation with progressive resource usage
 """
 
 import os
@@ -10,9 +10,19 @@ import threading
 import time
 import tempfile
 import uuid
+import shutil
+import random
+from typing import Dict, List, Any, Optional, Tuple
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+# Import resource manager
+try:
+    from utils.resource_manager import resource_manager
+except ImportError:
+    resource_manager = None
+    logger.warning("Resource manager not available - using default settings")
 
 # Check for selenium availability
 _SELENIUM_AVAILABLE = False
@@ -27,14 +37,118 @@ try:
 except ImportError:
     logger.warning("Selenium not installed - will use fallback screenshot methods")
 
-# Limit concurrent Chrome instances
-_chrome_semaphore = threading.Semaphore(3)
+# Detect whether pure_screenshot is available
+_PURE_SCREENSHOT_AVAILABLE = False
+try:
+    from utils.pure_screenshot import take_screenshot as pure_take_screenshot
+    _PURE_SCREENSHOT_AVAILABLE = True
+except ImportError:
+    _PURE_SCREENSHOT_AVAILABLE = False
 
-def take_screenshot(url, output_path):
-    """Take a screenshot of a URL with robust error handling"""
+# Default concurrency - will be updated by initialize_screenshot_system
+_MAX_WORKERS = 2
+_chrome_semaphore = threading.Semaphore(_MAX_WORKERS)
+
+# Browser process timeout
+_BROWSER_PROCESS_TIMEOUT = 30  # seconds
+
+# Clean up any leftover browser processes at module import time
+if resource_manager:
+    try:
+        resource_manager.kill_browser_processes()
+        resource_manager.clean_temporary_dirs()
+    except Exception:
+        pass
+
+def initialize_screenshot_system(max_workers=2):
+    """Initialize the screenshot system with the specified concurrency"""
+    global _MAX_WORKERS, _chrome_semaphore
+    
+    # Update max workers
+    _MAX_WORKERS = max_workers
+    
+    # Create new semaphore
+    _chrome_semaphore = threading.Semaphore(_MAX_WORKERS)
+    
+    # Start resource monitoring if available
+    if resource_manager:
+        resource_manager.start_monitoring()
+        
+    logger.info(f"Screenshot system initialized with {_MAX_WORKERS} workers")
+    
+    # Clean up any leftover browser processes or temp files
+    clean_browser_environment()
+    
+def clean_browser_environment():
+    """Clean up browser environment before starting"""
+    # Kill stuck browser processes
+    if resource_manager:
+        killed = resource_manager.kill_browser_processes()
+        if killed > 0:
+            logger.info(f"Cleaned up {killed} browser processes")
+        
+        # Clean temporary directories
+        cleaned = resource_manager.clean_temporary_dirs()
+        if cleaned > 0:
+            logger.info(f"Cleaned up {cleaned} temporary directories")
+    
+    # Always clean chrome temp dirs by pattern
+    temp_dir = tempfile.gettempdir()
+    for item in os.listdir(temp_dir):
+        if item.startswith('chrome_') and os.path.isdir(os.path.join(temp_dir, item)):
+            try:
+                shutil.rmtree(os.path.join(temp_dir, item), ignore_errors=True)
+            except Exception:
+                pass
+
+def take_screenshot(url, output_path, priority="normal"):
+    """Take a screenshot of a URL with smart strategy selection
+    
+    Args:
+        url: The URL to capture
+        output_path: Where to save the screenshot
+        priority: Priority level ('high', 'normal', 'low')
+    
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    # Always attempt browser-based screenshots first for all priorities
+    # Only use fallback if browser approach fails
+    success = take_browser_screenshot(url, output_path)
+    
+    # If browser screenshot fails, try the fallback method
+    if not success and _PURE_SCREENSHOT_AVAILABLE:
+        try:
+            logger.info(f"Browser screenshot failed, trying pure screenshot for {url}")
+            return pure_take_screenshot(url, output_path)
+        except Exception as e:
+            logger.warning(f"Pure screenshot failed, using fallback: {e}")
+            return create_fallback_screenshot(url, output_path)
+            
+    return success
+
+def take_lightweight_screenshot(url, output_path):
+    """Take a screenshot using lightweight methods (no browser)"""
+    # Try pure screenshot module if available
+    if _PURE_SCREENSHOT_AVAILABLE:
+        try:
+            return pure_take_screenshot(url, output_path)
+        except Exception as e:
+            logger.warning(f"Pure screenshot method failed: {e}")
+    
+    # Fallback to our own implementation
+    return create_fallback_screenshot(url, output_path)
+
+def take_browser_screenshot(url, output_path):
+    """Take a screenshot using a browser (Selenium) with minimal resource usage"""
     if not _SELENIUM_AVAILABLE:
         logger.info(f"Selenium not available - using fallback for {url}")
         return create_fallback_screenshot(url, output_path)
+    
+    # Wait for resource manager if needed
+    if resource_manager and resource_manager.should_pause():
+        logger.info(f"Waiting for resources before taking screenshot of {url}")
+        resource_manager.wait_if_needed(timeout=60)  # Wait up to a minute
     
     # Acquire semaphore to limit concurrent Chrome instances
     if not _chrome_semaphore.acquire(timeout=60):
@@ -42,81 +156,302 @@ def take_screenshot(url, output_path):
         return create_fallback_screenshot(url, output_path)
     
     driver = None
+    temp_dir = None
     success = False
+    process_pid = None
     
     try:
         # Create a unique temporary directory for Chrome user data
         temp_dir = os.path.join(tempfile.gettempdir(), f"chrome_{uuid.uuid4().hex}")
         os.makedirs(temp_dir, exist_ok=True)
         
-        # Configure Chrome options - use minimal settings that work
-        options = Options()
-        options.add_argument("--headless=new")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-gpu")
-        options.add_argument(f"--user-data-dir={temp_dir}")
+        # Try multiple browser configurations until one succeeds
+        for browser_config in get_browser_configs(temp_dir):
+            try:
+                # Configure Chrome options
+                options = browser_config.get('options')
+                binary_location = browser_config.get('binary')
+                
+                # Setup driver with timeout
+                logger.info(f"Initializing browser for {url} with config: {browser_config.get('name')}")
+                
+                # Try to find chromedriver
+                chromedriver_path = find_chromedriver()
+                if chromedriver_path:
+                    service = Service(executable_path=chromedriver_path)
+                    driver = webdriver.Chrome(service=service, options=options)
+                else:
+                    # Let Selenium try to find the driver
+                    driver = webdriver.Chrome(options=options)
+                
+                # Record process ID if possible to ensure cleanup
+                try:
+                    if hasattr(driver.service, 'process') and driver.service.process:
+                        process_pid = driver.service.process.pid
+                except Exception:
+                    pass
+                
+                # Set stricter timeouts to prevent hanging
+                driver.set_page_load_timeout(15)     # 15 seconds page load timeout
+                driver.set_script_timeout(8)         # 8 seconds script timeout
+                
+                # Navigate to URL
+                logger.info(f"Navigating to {url}")
+                
+                try:
+                    # Attempt navigation with minimal blocking
+                    driver.get(url)
+                except Exception as e:
+                    # If timeout occurs, try to capture what's already loaded
+                    logger.warning(f"Navigation timeout for {url}, attempting to capture partial page: {e}")
+                
+                # Wait a short time for essential content to render
+                time.sleep(1.5)
+                
+                # Execute JavaScript to stop further resource loading
+                try:
+                    driver.execute_script("""
+                    // Stop all image, CSS, and font loading
+                    window.stop();
+                    
+                    // Remove all animations
+                    var sheets = document.styleSheets;
+                    for(var i = 0; i < sheets.length; i++) {
+                        try {
+                            if(sheets[i].cssRules) {
+                                for(var j = 0; j < sheets[i].cssRules.length; j++) {
+                                    var rule = sheets[i].cssRules[j];
+                                    if(rule.cssText.includes('animation') || rule.cssText.includes('transition')) {
+                                        sheets[i].deleteRule(j);
+                                        j--;
+                                    }
+                                }
+                            }
+                        } catch(e) {}
+                    }
+                    """)
+                except Exception:
+                    pass
+                
+                # Ensure output directory exists
+                os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                
+                # Take screenshot
+                driver.save_screenshot(output_path)
+                logger.info(f"Screenshot saved to {output_path}")
+                
+                # Save minimal page content - only essentials like title and meta tags
+                try:
+                    text_path = output_path.rsplit('.', 1)[0] + '.txt'
+                    with open(text_path, 'w', encoding='utf-8') as f:
+                        try:
+                            # Extract only the essentials
+                            title = driver.title
+                            url = driver.current_url
+                            
+                            # Get meta description if exists
+                            meta_desc = ""
+                            try:
+                                meta_elements = driver.find_elements(By.XPATH, "//meta[@name='description']")
+                                if meta_elements:
+                                    meta_desc = meta_elements[0].get_attribute("content")
+                            except Exception:
+                                pass
+                                
+                            # Write minimal content
+                            f.write(f"Title: {title}\n")
+                            f.write(f"URL: {url}\n")
+                            if meta_desc:
+                                f.write(f"Description: {meta_desc}\n")
+                        except Exception:
+                            # If extraction fails, save full page source as fallback
+                            f.write(driver.page_source)
+                except Exception as e:
+                    logger.warning(f"Failed to save page text: {e}")
+                
+                success = True
+                break
+            except Exception as e:
+                logger.warning(f"Browser config {browser_config.get('name')} failed: {e}")
+                if driver:
+                    try:
+                        driver.quit()
+                    except Exception:
+                        pass
+                    driver = None
         
-        # Find the Chrome binary
-        chrome_binary = find_chrome_binary()
-        if chrome_binary:
-            options.binary_location = chrome_binary
-        
-        # Setup driver
-        logger.info(f"Initializing Chrome driver for {url}")
-        
-        # Try to find chromedriver
-        chromedriver_path = find_chromedriver()
-        if chromedriver_path:
-            service = Service(executable_path=chromedriver_path)
-            driver = webdriver.Chrome(service=service, options=options)
-        else:
-            # Let Selenium try to find the driver
-            driver = webdriver.Chrome(options=options)
-        
-        # Set timeout and navigate
-        driver.set_page_load_timeout(30)
-        logger.info(f"Navigating to {url}")
-        driver.get(url)
-        
-        # Ensure output directory exists
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        
-        # Take screenshot
-        driver.save_screenshot(output_path)
-        logger.info(f"Screenshot saved to {output_path}")
-        
-        # Save page content
-        try:
-            text_path = output_path.rsplit('.', 1)[0] + '.txt'
-            with open(text_path, 'w', encoding='utf-8') as f:
-                f.write(driver.page_source)
-        except Exception as e:
-            logger.warning(f"Failed to save page text: {e}")
-        
-        success = True
+        if not success:
+            logger.error(f"All browser configurations failed for {url}, using fallback")
+            return create_fallback_screenshot(url, output_path)
+            
         return True
         
     except Exception as e:
         logger.error(f"Screenshot failed: {e}")
         return create_fallback_screenshot(url, output_path)
     finally:
+        # Ensure driver is properly closed
         if driver:
             try:
                 driver.quit()
-            except Exception:
-                pass
+                logger.debug(f"Browser driver closed successfully for {url}")
+            except Exception as e:
+                logger.warning(f"Error closing browser driver: {e}")
+        
+        # Try to kill the process directly if we have the PID
+        if process_pid:
+            try:
+                import signal
+                import os
+                os.kill(process_pid, signal.SIGTERM)
+                logger.debug(f"Sent SIGTERM to browser process {process_pid}")
+                # Give it a moment to terminate gracefully
+                time.sleep(0.5)
+                try:
+                    # Check if process still exists
+                    os.kill(process_pid, 0)
+                    # If we get here, process is still running, try SIGKILL
+                    os.kill(process_pid, signal.SIGKILL)
+                    logger.debug(f"Sent SIGKILL to browser process {process_pid}")
+                except OSError:
+                    # Process no longer exists, which is what we want
+                    pass
+            except Exception as e:
+                logger.warning(f"Error killing browser process {process_pid}: {e}")
         
         # Clean up temporary directories
         try:
-            import shutil
-            if 'temp_dir' in locals() and temp_dir and os.path.exists(temp_dir):
+            if temp_dir and os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir, ignore_errors=True)
+                logger.debug(f"Removed temporary directory {temp_dir}")
         except Exception as e:
             logger.warning(f"Failed to clean up temp dir: {e}")
         
         # Release semaphore
         _chrome_semaphore.release()
+        
+        # Additional system-wide cleanup for persistent processes
+        if resource_manager:
+            try:
+                # Only do this occasionally to avoid overhead
+                if random.random() < 0.1:  # 10% chance
+                    resource_manager.kill_browser_processes(timeout_seconds=2)
+            except Exception:
+                pass
+
+def get_browser_configs(temp_dir):
+    """Get a list of browser configurations to try in order"""
+    configs = []
+    
+    # Find Chrome binary
+    chrome_binary = find_chrome_binary()
+    
+    # Configuration 1: Ultra-minimal headless
+    options1 = Options()
+    options1.add_argument("--headless=new")
+    options1.add_argument("--no-sandbox")
+    options1.add_argument("--disable-dev-shm-usage")
+    options1.add_argument("--disable-gpu")
+    options1.add_argument(f"--user-data-dir={temp_dir}")
+    
+    # Disable all extensions and unnecessary features
+    options1.add_argument("--disable-extensions")
+    options1.add_argument("--disable-plugins")
+    options1.add_argument("--disable-software-rasterizer")
+    options1.add_argument("--disable-popup-blocking")
+    options1.add_argument("--disable-default-apps")
+    options1.add_argument("--disable-background-networking")
+    options1.add_argument("--disable-background-timer-throttling")
+    options1.add_argument("--disable-backgrounding-occluded-windows")
+    options1.add_argument("--disable-breakpad")
+    options1.add_argument("--disable-client-side-phishing-detection")
+    options1.add_argument("--disable-component-update")
+    options1.add_argument("--disable-domain-reliability")
+    options1.add_argument("--disable-features=TranslateUI,BlinkGenPropertyTrees,LazyFrameLoading,AutomationControlled")
+    options1.add_argument("--disable-hang-monitor")
+    options1.add_argument("--disable-ipc-flooding-protection")
+    options1.add_argument("--disable-notifications")
+    options1.add_argument("--disable-offer-store-unmasked-wallet-cards")
+    options1.add_argument("--disable-print-preview")
+    options1.add_argument("--disable-prompt-on-repost")
+    options1.add_argument("--disable-renderer-backgrounding")
+    options1.add_argument("--disable-sync")
+    options1.add_argument("--mute-audio")
+    options1.add_argument("--no-pings")
+    options1.add_argument("--no-experiments")
+    options1.add_argument("--no-first-run")
+    options1.add_argument("--no-default-browser-check")
+    
+    # Limit memory usage
+    options1.add_argument("--js-flags=--max-old-space-size=256")
+    options1.add_argument("--memory-pressure-off")
+    options1.add_argument("--force-fieldtrials=*BackgroundTracing/default/")
+    
+    if chrome_binary:
+        options1.binary_location = chrome_binary
+    configs.append({
+        'name': 'ultra-minimal-headless',
+        'options': options1,
+        'binary': chrome_binary
+    })
+    
+    # Configuration 2: Incognito mode with minimal features
+    options2 = Options()
+    options2.add_argument("--incognito")
+    options2.add_argument("--headless=new")
+    options2.add_argument("--no-sandbox")
+    options2.add_argument("--disable-dev-shm-usage")
+    options2.add_argument(f"--user-data-dir={temp_dir}_2")
+    
+    # Disable all extensions and unnecessary features
+    options2.add_argument("--disable-extensions")
+    options2.add_argument("--disable-plugins")
+    options2.add_argument("--disable-software-rasterizer")
+    options2.add_argument("--disable-popup-blocking")
+    options2.add_argument("--disable-default-apps")
+    options2.add_argument("--disable-background-networking")
+    options2.add_argument("--disable-component-update")
+    options2.add_argument("--disable-domain-reliability")
+    options2.add_argument("--mute-audio")
+    options2.add_argument("--no-first-run")
+    
+    # Limit memory usage
+    options2.add_argument("--js-flags=--max-old-space-size=256")
+    
+    if chrome_binary:
+        options2.binary_location = chrome_binary
+    configs.append({
+        'name': 'minimal-incognito',
+        'options': options2,
+        'binary': chrome_binary
+    })
+    
+    # Configuration 3: Non-headless with minimal window and features
+    options3 = Options()
+    options3.add_argument("--window-size=800,600")
+    options3.add_argument("--no-sandbox")
+    options3.add_argument(f"--user-data-dir={temp_dir}_3")
+    options3.add_argument("--disable-extensions")
+    options3.add_argument("--disable-plugins")
+    options3.add_argument("--disable-popup-blocking")
+    options3.add_argument("--disable-default-apps")
+    options3.add_argument("--disable-background-networking")
+    options3.add_argument("--mute-audio")
+    options3.add_argument("--no-first-run")
+    
+    if chrome_binary:
+        options3.binary_location = chrome_binary
+    configs.append({
+        'name': 'minimal-window',
+        'options': options3,
+        'binary': chrome_binary
+    })
+    
+    # Shuffle configurations to avoid all workers trying the same config
+    # This distributes the load better across different browser modes
+    random.shuffle(configs)
+    
+    return configs
 
 def find_chrome_binary():
     """Find Chrome or Chromium binary on the system"""
@@ -125,7 +460,10 @@ def find_chrome_binary():
         "/usr/bin/chromium",          # Some Linux distros
         "/snap/bin/chromium",         # Snap installation
         "/usr/bin/google-chrome",     # Standard Chrome Linux
-        "/usr/bin/google-chrome-stable"
+        "/usr/bin/google-chrome-stable",
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",  # macOS
+        "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",    # Windows
+        "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"
     ]
     
     for path in possible_paths:
@@ -140,7 +478,8 @@ def find_chromedriver():
     """Find chromedriver on the system"""
     possible_paths = [
         "/usr/bin/chromedriver",
-        "/usr/local/bin/chromedriver"
+        "/usr/local/bin/chromedriver",
+        "/snap/bin/chromedriver"
     ]
     
     for path in possible_paths:
@@ -162,7 +501,7 @@ def create_fallback_screenshot(url, output_path):
         
         # Try to fetch page content
         try:
-            response = requests.get(url, timeout=30, verify=False, headers={
+            response = requests.get(url, timeout=15, verify=False, headers={
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124 Safari/537.36'
             })
             content = response.text
@@ -244,7 +583,51 @@ def create_fallback_screenshot(url, output_path):
         
         return False
 
-# Batch processing functions (keep the same interface)
+# ──────────── Batch processing functions ────────────
+
+def prioritize_screenshot_tasks(findings):
+    """Sort findings by priority for progressive screenshot capture"""
+    # Determine priority for each finding
+    priority_findings = []
+    
+    for finding in findings:
+        if finding is None:
+            continue
+            
+        # Skip items marked as downloadable
+        if finding.get('downloadable'):
+            continue
+            
+        # Determine priority based on various factors
+        priority = "normal"
+        
+        # Higher priority for certain paths
+        path = finding.get('path', '').lower()
+        status = finding.get('status', 0)
+        
+        # High priority for login, admin, config, etc.
+        sensitive_terms = ['login', 'admin', 'dashboard', 'config', 'setup', 
+                          'install', 'phpinfo', 'backup', '.git', '.env']
+                          
+        if any(term in path for term in sensitive_terms):
+            priority = "high"
+            
+        # High priority for 200 OK responses to potentially interesting paths
+        elif status == 200 and any(ext in path for ext in ['.php', '.asp', '.jsp']):
+            priority = "high"
+            
+        # Lower priority for static files, images, etc.
+        elif any(ext in path for ext in ['.css', '.js', '.png', '.jpg', '.gif', '.svg']):
+            priority = "low"
+            
+        priority_findings.append((finding, priority))
+    
+    # Sort by priority: high -> normal -> low
+    priority_order = {"high": 0, "normal": 1, "low": 2}
+    priority_findings.sort(key=lambda x: priority_order[x[1]])
+    
+    return priority_findings
+
 def filter_screenshot_tasks(findings):
     """Filter findings to identify unique screenshots needed"""
     # Keep track of unique URLs needing screenshots
@@ -271,36 +654,117 @@ def filter_screenshot_tasks(findings):
     return unique_findings
 
 def take_screenshots_parallel(task_list, max_workers=3):
-    """Take multiple screenshots in parallel"""
-    import concurrent.futures
+    """Take multiple screenshots in parallel with progressive loading
     
-    logger.info(f"Taking {len(task_list)} screenshots in parallel")
+    This optimized version:
+    1. Prioritizes important screenshots first
+    2. Uses resource-aware throttling
+    3. Cleans up browser processes between batches
+    """
+    # Initialize the screenshot system
+    initialize_screenshot_system(max_workers=max_workers)
     
-    # Process with appropriate concurrency
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks
-        future_to_task = {
-            executor.submit(take_screenshot, task['url'], task['output_path']): task
-            for task in task_list
-        }
+    # If task list is empty, nothing to do
+    if not task_list:
+        return
         
-        # Process as completed
-        completed = 0
-        for future in concurrent.futures.as_completed(future_to_task):
-            task = future_to_task[future]
-            try:
-                success = future.result()
-                if success:
-                    logger.info(f"✓ Screenshot for {task['url']}")
-                else:
-                    logger.warning(f"✗ Failed screenshot for {task['url']}")
-            except Exception as e:
-                logger.error(f"Error in screenshot task: {e}")
+    logger.info(f"Taking {len(task_list)} screenshots with {max_workers} workers")
+    
+    # Process high priority screenshots first
+    high_priority_tasks = [task for task in task_list 
+                          if task.get('priority', 'normal') == 'high']
+    normal_priority_tasks = [task for task in task_list 
+                            if task.get('priority', 'normal') == 'normal']
+    low_priority_tasks = [task for task in task_list 
+                         if task.get('priority', 'normal') == 'low']
+    
+    # Process in batches by priority
+    all_batches = [
+        ("high priority", high_priority_tasks),
+        ("normal priority", normal_priority_tasks),
+        ("low priority", low_priority_tasks)
+    ]
+    
+    total_completed = 0
+    total_tasks = len(task_list)
+    
+    for batch_idx, (batch_name, batch_tasks) in enumerate(all_batches):
+        if not batch_tasks:
+            continue
             
-            # Update progress
-            completed += 1
-            if completed % 5 == 0 or completed == len(task_list):
-                logger.info(f"Screenshot progress: {completed}/{len(task_list)}")
+        logger.info(f"Processing {len(batch_tasks)} {batch_name} screenshots")
+        
+        # Aggressive cleanup before each batch
+        clean_browser_environment()
+        
+        # Add small delay between batch starts to allow cleanup to complete
+        if batch_idx > 0:
+            time.sleep(2)
+        
+        # Process batch with appropriate concurrency
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks for this batch
+            future_to_task = {
+                executor.submit(take_screenshot, 
+                               task['url'], 
+                               task['output_path'],
+                               task.get('priority', 'normal')): task
+                for task in batch_tasks
+            }
+            
+            # Process as completed
+            batch_completed = 0
+            for future in concurrent.futures.as_completed(future_to_task):
+                task = future_to_task[future]
+                try:
+                    success = future.result()
+                    if success:
+                        logger.info(f"✓ Screenshot for {task['url']}")
+                    else:
+                        logger.warning(f"✗ Failed screenshot for {task['url']}")
+                except Exception as e:
+                    logger.error(f"Error in screenshot task: {e}")
+                
+                # Update progress
+                batch_completed += 1
+                total_completed += 1
+                
+                if batch_completed % 5 == 0 or batch_completed == len(batch_tasks):
+                    logger.info(f"Batch progress: {batch_completed}/{len(batch_tasks)}")
+                
+                if total_completed % 10 == 0 or total_completed == total_tasks:
+                    logger.info(f"Overall progress: {total_completed}/{total_tasks}")
+                    
+                # Occasional process cleanup even within a batch
+                if batch_completed % max(10, len(batch_tasks) // 3) == 0:
+                    if resource_manager:
+                        try:
+                            resource_manager.kill_browser_processes(timeout_seconds=1)
+                        except Exception:
+                            pass
+        
+        # Thorough cleanup after each batch
+        clean_browser_environment()
+        
+        if resource_manager:
+            try:
+                # More aggressive cleanup after a batch is completed
+                resource_manager.kill_browser_processes(timeout_seconds=3)
+                resource_manager.clean_temporary_dirs()
+                
+                # If this is the last batch, do a final cleanup
+                if batch_idx == len(all_batches) - 1 or total_completed == total_tasks:
+                    logger.info("Performing final browser process cleanup")
+                    # Give a moment for any lingering processes to finish
+                    time.sleep(1)
+                    resource_manager.kill_browser_processes(timeout_seconds=5)
+            except Exception as e:
+                logger.warning(f"Error during batch cleanup: {e}")
+                
+    # Final cleanup to ensure no processes remain
+    logger.info("Screenshot tasks completed, performing final cleanup")
+    clean_browser_environment()
 
 # For testing
 if __name__ == "__main__":
@@ -313,6 +777,9 @@ if __name__ == "__main__":
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, "test_screenshot.png")
     
+    # Initialize screenshot system
+    initialize_screenshot_system(max_workers=2)
+    
     # Take screenshot
-    success = take_screenshot(test_url, output_path)
+    success = take_screenshot(test_url, output_path, priority="high")
     print(f"Screenshot {'succeeded' if success else 'failed'}: {output_path}")
