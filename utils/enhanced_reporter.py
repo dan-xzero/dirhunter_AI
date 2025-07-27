@@ -4,6 +4,7 @@
 import os
 import json
 import re
+import logging
 from datetime import datetime
 from collections import defaultdict, Counter
 from typing import Dict, List, Any, Tuple
@@ -12,6 +13,10 @@ import requests
 
 from utils.tech_helpers import extract_tech_and_cves, aggregate_cves, severity_from_count, get_vuln_severity
 
+# Set up logger
+logger = logging.getLogger(__name__)
+
+# Constants
 HTML_REPORT_DIR = "results/html"
 
 def _slugify_name(value: str) -> str:

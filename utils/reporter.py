@@ -1,13 +1,20 @@
 # File: dirhunter_ai/utils/reporter.py
 
 import os
+import time
+import re
+import hashlib
+import json
+import logging
 from datetime import datetime
 from collections import defaultdict
-import json
 import requests
 from functools import lru_cache
 from utils.tech_helpers import extract_tech_and_cves, aggregate_cves, severity_from_count
 import re
+
+# Set up logger
+logger = logging.getLogger(__name__)
 
 HTML_REPORT_DIR = "results/html"
 
