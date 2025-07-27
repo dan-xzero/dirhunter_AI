@@ -320,7 +320,7 @@ def process_domains_parallel(domains_with_wordlists, args, shared_results):
     
     # Throttle based on resources
     if resource_manager:
-        recommended_domains = resource_manager.get_recommended_concurrency()[0]
+        recommended_domains = resource_manager.get_recommended_concurrency()
         
         # Update args if auto-scaling is enabled
         if not args.disable_resource_optimization:
@@ -457,7 +457,7 @@ def main():
         resource_manager.start_monitoring()
         
         # Get recommended concurrency
-        recommended_domains = resource_manager.get_recommended_concurrency()[0]
+        recommended_domains = resource_manager.get_recommended_concurrency()
         
         # Auto-adjust concurrency settings
         if args.parallel_domains > recommended_domains:
