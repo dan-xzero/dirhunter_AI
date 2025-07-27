@@ -651,6 +651,18 @@ def export_tag_based_reports(domain, findings, output_dir=HTML_REPORT_DIR):
     """
     Creates enhanced reports with better styling and finding status indicators
     """
+    # Enrich findings to ensure all required data is present
+    try:
+        from utils.findings_enricher import enrich_findings, save_enriched_findings
+        logger.info(f"Enriching {len(findings)} findings for {domain}")
+        findings = enrich_findings(domain, findings)
+        save_enriched_findings(domain, findings)
+    except ImportError:
+        logger.warning("findings_enricher not available - using raw findings")
+    except Exception as e:
+        logger.error(f"Error enriching findings: {e}")
+        
+    # Create output directory
     os.makedirs(output_dir, exist_ok=True)
 
     # Group results by AI tag

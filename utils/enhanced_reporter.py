@@ -112,6 +112,25 @@ def create_enhanced_dashboard(all_domains_data, is_update=False):
     - all_domains_data: Dictionary mapping domains to their findings
     - is_update: If True, indicates this is an update to an existing dashboard
     """
+    # Import the path manager and findings enricher
+    try:
+        from utils.path_handler import path_manager
+        from utils.findings_enricher import enrich_findings, save_enriched_findings
+        
+        # Fix domain data before processing
+        fixed_data = {}
+        for domain, findings in all_domains_data.items():
+            logger.info(f"Enriching {len(findings)} findings for {domain}")
+            fixed_data[domain] = enrich_findings(domain, findings)
+            save_enriched_findings(domain, fixed_data[domain])
+        
+        # Continue with fixed data
+        all_domains_data = fixed_data
+    except ImportError:
+        logger.warning("path_handler or findings_enricher not available - using raw findings")
+    except Exception as e:
+        logger.error(f"Error enriching findings for dashboard: {e}")
+        
     os.makedirs(HTML_REPORT_DIR, exist_ok=True)
     
     dashboard_file = os.path.join(HTML_REPORT_DIR, "dashboard.html")

@@ -151,10 +151,20 @@ def chromedriver_available() -> bool:
 def take_screenshot(url, output_path):
     if not _SELENIUM_AVAILABLE:
         print(f"[i] Skipping screenshot for {url} – selenium not installed.")
+        try:
+            from utils.screenshot_fallback import create_placeholder_screenshot
+            create_placeholder_screenshot(url, output_path)
+        except ImportError:
+            print(f"[!] Screenshot fallback not available for {url}")
         return
     # NEW: throttle concurrent Chrome launches
     if not _chrome_semaphore.acquire(timeout=60):
         print("[!] Could not acquire Chrome semaphore (timeout)")
+        try:
+            from utils.screenshot_fallback import create_placeholder_screenshot
+            create_placeholder_screenshot(url, output_path)
+        except ImportError:
+            print(f"[!] Screenshot fallback not available after semaphore timeout")
         return
     driver = None
     try:
@@ -232,27 +242,21 @@ def take_screenshot(url, output_path):
         else:
             # create empty file to signal capture attempt
             open(text_path, 'w').close()
-        
     except Exception as e:
-        print(f"[!] Screenshot failed for {url}: {e}")
-        
-        # Try to provide helpful error messages
-        if "session not created" in str(e).lower():
-            print(f"[!] ChromeDriver compatibility issue detected.")
-            print(f"[!] Try running: brew upgrade chromedriver")
-        elif "chromedriver" in str(e).lower() or "driver for chrome" in str(e).lower():
-            print(f"[!] ChromeDriver not found or not executable.")
-            print(f"[!] Try installing: brew install chromedriver")
-        elif "timeout" in str(e).lower():
-            print(f"[!] Page load timeout - the site might be slow or unresponsive.")
-        
+        print(f"[!] Screenshot failed: {e}")
+        try:
+            from utils.screenshot_fallback import create_placeholder_screenshot
+            create_placeholder_screenshot(url, output_path)
+            print(f"[i] Created placeholder screenshot for {url}")
+        except ImportError:
+            print(f"[!] Screenshot fallback not available after error: {e}")
     finally:
         if driver:
             try:
                 driver.quit()
-            except:
+            except Exception:
                 pass
-        _chrome_semaphore.release()  # NEW: release semaphore
+        _chrome_semaphore.release()
 
 # ─────────── pre-filtering ───────────
 def filter_screenshot_tasks(findings):
