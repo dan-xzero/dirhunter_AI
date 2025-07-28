@@ -12,6 +12,7 @@ import tempfile
 import uuid
 import shutil
 import random
+import subprocess
 from typing import Dict, List, Any, Optional, Tuple
 import urllib3
 
@@ -226,6 +227,108 @@ def create_fallback_screenshot(url, output_path):
         # Return False but don't raise an exception
         return False
 
+def take_direct_screenshot(url, output_path):
+    """Take a screenshot using direct browser command
+    
+    This method bypasses Selenium and directly uses Chrome/Chromium
+    with Xvfb for more reliable screenshots in restricted environments.
+    
+    Args:
+        url: URL to capture
+        output_path: Path to save the screenshot
+    
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    logger.info(f"Taking direct screenshot of {url}")
+    
+    # Ensure output directory exists
+    try:
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    except Exception as e:
+        logger.error(f"Failed to create output directory: {e}")
+        return False
+    
+    # Find an available display number
+    display_num = 99
+    while os.path.exists(f"/tmp/.X{display_num}-lock"):
+        display_num += 1
+    
+    logger.info(f"Using display :{display_num}")
+    
+    # Create a temporary script to run the screenshot
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as script:
+        script_path = script.name
+        script.write(f"""#!/bin/bash
+# Start Xvfb
+Xvfb :{display_num} -screen 0 1280x1024x24 -ac &
+XVFB_PID=$!
+
+# Wait for Xvfb
+sleep 1
+
+# Set display and prevent dbus errors
+export DISPLAY=:{display_num}
+export DBUS_SESSION_BUS_ADDRESS="unix:path=/dev/null"
+
+# Take screenshot
+BROWSER=""
+if [ -x "/usr/bin/google-chrome-stable" ]; then
+    BROWSER="/usr/bin/google-chrome-stable"
+elif [ -x "/usr/bin/google-chrome" ]; then
+    BROWSER="/usr/bin/google-chrome"
+elif [ -x "/usr/bin/chromium-browser" ]; then
+    BROWSER="/usr/bin/chromium-browser"
+elif [ -x "/usr/bin/chromium" ]; then
+    BROWSER="/usr/bin/chromium"
+fi
+
+if [ -n "$BROWSER" ]; then
+    $BROWSER --headless=new --disable-gpu --no-sandbox \\
+        --disable-dev-shm-usage --disable-software-rasterizer \\
+        --disable-background-networking --disable-default-apps \\
+        --disable-extensions --disable-sync --disable-translate \\
+        --hide-scrollbars --metrics-recording-only --mute-audio \\
+        --no-first-run --safebrowsing-disable-auto-update \\
+        --screenshot="{output_path}" "{url}" 
+    
+    # Save page content
+    $BROWSER --headless=new --disable-gpu --no-sandbox \\
+        --disable-extensions --disable-dev-shm-usage \\
+        --dump-dom "{url}" > "{os.path.splitext(output_path)[0]}.txt" 2>/dev/null
+fi
+
+# Kill Xvfb
+kill $XVFB_PID 2>/dev/null || true
+""")
+    
+    # Make script executable
+    os.chmod(script_path, 0o755)
+    
+    try:
+        # Run the script
+        result = subprocess.run([script_path], 
+                                capture_output=True, 
+                                text=True, 
+                                timeout=60)
+        
+        # Check if screenshot was created
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            logger.info(f"Direct screenshot saved to {output_path}")
+            return True
+        else:
+            logger.error(f"Direct screenshot failed: {result.stderr}")
+            return False
+    except Exception as e:
+        logger.error(f"Error taking direct screenshot: {e}")
+        return False
+    finally:
+        # Clean up the script
+        try:
+            os.unlink(script_path)
+        except Exception:
+            pass
+
 def take_screenshot(url, output_path, priority="normal"):
     """Take a screenshot of a URL with smart strategy selection
     
@@ -237,24 +340,23 @@ def take_screenshot(url, output_path, priority="normal"):
     Returns:
         bool: True if successful, False otherwise
     """
-    try:
-        # Always attempt browser-based screenshots first for all priorities
-        # Only use fallback if browser approach fails
+    import os
+    
+    # First try direct screenshot method as it's most reliable
+    logger.info(f"Taking screenshot of {url} with {priority} priority")
+    success = take_direct_screenshot(url, output_path)
+    
+    # If direct method fails, try browser screenshot
+    if not success:
+        logger.info(f"Direct screenshot failed, trying browser screenshot for {url}")
         success = take_browser_screenshot(url, output_path)
-        
-        # If browser screenshot fails, try the fallback method
-        if not success:
-            logger.info(f"Browser screenshot failed, using fallback for {url}")
-            return create_fallback_screenshot(url, output_path)
-            
-        return success
-    except Exception as e:
-        logger.error(f"Screenshot error for {url}: {e}")
-        try:
-            return create_fallback_screenshot(url, output_path)
-        except Exception as e2:
-            logger.error(f"Fallback also failed: {e2}")
-            return False
+    
+    # If browser screenshot fails too, try fallback
+    if not success:
+        logger.info(f"Browser screenshot failed, using fallback for {url}")
+        success = create_fallback_screenshot(url, output_path)
+    
+    return success
 
 def take_browser_screenshot(url, output_path):
     """Take a screenshot using a browser (Selenium) with minimal resource usage"""
@@ -624,11 +726,11 @@ def find_chrome_binary(binary_name='chrome'):
     
     if binary_name == 'chrome':
         possible_paths = [
-            "/usr/bin/chromium-browser",  # Ubuntu/Debian with snap
-            "/usr/bin/chromium",          # Some Linux distros
-            "/snap/bin/chromium",         # Snap installation
-            "/usr/bin/google-chrome",     # Standard Chrome Linux
-            "/usr/bin/google-chrome-stable",
+            "/usr/bin/google-chrome-stable",  # Standard Chrome Linux
+            "/usr/bin/google-chrome",         # Standard Chrome Linux
+            "/usr/bin/chromium-browser",      # Ubuntu/Debian with snap
+            "/usr/bin/chromium",              # Some Linux distros
+            "/snap/bin/chromium",             # Snap installation
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",  # macOS
             "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",    # Windows
             "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"
