@@ -13,6 +13,9 @@ import uuid
 import shutil
 import random
 import subprocess
+import signal
+import atexit
+import glob
 from typing import Dict, List, Any, Optional, Tuple
 import urllib3
 
@@ -21,6 +24,20 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+# Register aggressive cleanup to run on script exit
+def _aggressive_browser_cleanup():
+    try:
+        # Force kill ALL browser processes with SIGKILL
+        subprocess.run(
+            "pkill -9 -f 'firefox|firefox-bin|chrome|chromium|geckodriver|chromedriver|Xvfb'",
+            shell=True, stderr=subprocess.DEVNULL
+        )
+    except Exception:
+        pass
+
+# Register the cleanup function to run when the script exits
+atexit.register(_aggressive_browser_cleanup)
 
 # Import resource manager
 try:
@@ -91,33 +108,77 @@ def initialize_screenshot_system(max_workers=1):
     clean_browser_environment()
     
 def clean_browser_environment():
-    """Clean up browser environment before starting"""
-    # Kill stuck browser processes
-    if resource_manager:
-        try:
-            killed = resource_manager.kill_browser_processes()
-            if killed > 0:
-                logger.info(f"Cleaned up {killed} browser processes")
-            
-            # Clean temporary directories
-            cleaned = resource_manager.clean_temporary_dirs()
-            if cleaned > 0:
-                logger.info(f"Cleaned up {cleaned} temporary directories")
-        except Exception as e:
-            logger.error(f"Error during browser environment cleanup: {e}")
+    """Clean up browser environment before starting - aggressive version"""
+    logger.info("Performing aggressive browser cleanup...")
     
-    # Always clean temp dirs by pattern
     try:
-        temp_dir = tempfile.gettempdir()
-        browser_patterns = ['chrome_', 'firefox_', 'gecko_', 'tmp_']
-        for item in os.listdir(temp_dir):
-            if any(item.startswith(pattern) for pattern in browser_patterns) and os.path.isdir(os.path.join(temp_dir, item)):
-                try:
-                    shutil.rmtree(os.path.join(temp_dir, item), ignore_errors=True)
-                except Exception as e:
-                    logger.error(f"Failed to remove temp dir {os.path.join(temp_dir, item)}: {e}")
+        # First try standard cleanup if resource_manager is available
+        if resource_manager:
+            try:
+                killed = resource_manager.kill_browser_processes()
+                if killed > 0:
+                    logger.info(f"Cleaned up {killed} browser processes")
+                
+                # Clean temporary directories
+                cleaned = resource_manager.clean_temporary_dirs()
+                if cleaned > 0:
+                    logger.info(f"Cleaned up {cleaned} temporary directories")
+            except Exception as e:
+                logger.error(f"Error during standard browser cleanup: {e}")
+        
+        # Force kill ALL Firefox and Chrome processes
+        subprocess.run(
+            "pkill -9 -f 'firefox|firefox-bin|chrome|chromium'", 
+            shell=True, stderr=subprocess.DEVNULL
+        )
+        
+        # Force kill ALL driver processes
+        subprocess.run(
+            "pkill -9 -f 'geckodriver|chromedriver'", 
+            shell=True, stderr=subprocess.DEVNULL
+        )
+        
+        # Force kill ALL Xvfb processes
+        subprocess.run(
+            "pkill -9 -f 'Xvfb'", 
+            shell=True, stderr=subprocess.DEVNULL
+        )
+        
+        # Give the system a moment to clean up processes
+        time.sleep(1)
+        
+        # Clean up any stale lock files
+        for lock_file in glob.glob("/tmp/.X*-lock"):
+            try:
+                os.remove(lock_file)
+                logger.debug(f"Removed stale lock file: {lock_file}")
+            except Exception:
+                pass
+                
+        # Always clean temp dirs by pattern
+        try:
+            temp_dir = tempfile.gettempdir()
+            browser_patterns = ['chrome_', 'firefox_', 'gecko_', 'tmp_', '.org.chromium.', '.com.google.']
+            for item in os.listdir(temp_dir):
+                if any(pattern in item for pattern in browser_patterns) and os.path.isdir(os.path.join(temp_dir, item)):
+                    try:
+                        shutil.rmtree(os.path.join(temp_dir, item), ignore_errors=True)
+                    except Exception as e:
+                        logger.warning(f"Failed to remove temp dir {os.path.join(temp_dir, item)}: {e}")
+        except Exception as e:
+            logger.error(f"Error cleaning temporary directories: {e}")
+            
+        # Count processes after cleanup
+        count_cmd = "ps aux | grep -E 'firefox|chrome|chromium|gecko|selenium|xvfb' | grep -v grep | wc -l"
+        result = subprocess.run(count_cmd, shell=True, text=True, capture_output=True)
+        remaining = int(result.stdout.strip())
+        if remaining > 0:
+            logger.warning(f"Browser cleanup detected {remaining} remaining processes")
+        else:
+            logger.info("All browser processes successfully terminated")
+            
     except Exception as e:
-        logger.error(f"Error cleaning temporary directories: {e}")
+        logger.error(f"Error during aggressive browser cleanup: {e}")
 
 def create_fallback_screenshot(url, output_path):
     """Create a fallback screenshot when Selenium fails"""
