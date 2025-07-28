@@ -819,9 +819,9 @@ def take_screenshots_parallel(task_list, max_workers=3):
     This version:
     1. Prioritizes important screenshots first
     2. Takes screenshots one at a time to reduce resource usage
-    3. Cleans up the browser after each screenshot
+    3. Performs a single cleanup at the start and end, not between screenshots
     """
-    # Initialize the screenshot system
+    # Initialize the screenshot system (but don't prepare browsers yet)
     initialize_screenshot_system(max_workers=1)  # Set to 1 since we're processing sequentially
     
     # If task list is empty, nothing to do
@@ -845,6 +845,10 @@ def take_screenshots_parallel(task_list, max_workers=3):
         ("low priority", low_priority_tasks)
     ]
     
+    # Clean environment ONCE before starting any screenshots
+    # This will remove any leftover browser processes
+    clean_browser_environment()
+    
     total_completed = 0
     total_tasks = len(task_list)
     
@@ -853,9 +857,6 @@ def take_screenshots_parallel(task_list, max_workers=3):
             continue
             
         logger.info(f"Processing {len(batch_tasks)} {batch_name} screenshots")
-        
-        # Aggressive cleanup before each priority batch
-        clean_browser_environment()
         
         # Process each task in this batch sequentially
         batch_completed = 0
@@ -876,9 +877,6 @@ def take_screenshots_parallel(task_list, max_workers=3):
                 else:
                     logger.warning(f"✗ Failed screenshot for {task['url']}")
                     
-                # Clean up after each screenshot
-                clean_browser_environment()
-                
                 # Update progress
                 batch_completed += 1
                 total_completed += 1
@@ -889,14 +887,11 @@ def take_screenshots_parallel(task_list, max_workers=3):
                 if total_completed % 10 == 0 or total_completed == total_tasks:
                     logger.info(f"Overall progress: {total_completed}/{total_tasks}")
                     
-                # Small delay between screenshots to ensure complete cleanup
+                # Small delay between screenshots 
                 time.sleep(0.5)
                 
             except Exception as e:
                 logger.error(f"Error in screenshot task for {task['url']}: {e}")
-                
-        # Thorough cleanup after each batch
-        clean_browser_environment()
         
     # Final cleanup after all screenshots
     logger.info("Screenshot tasks completed, performing final cleanup")
