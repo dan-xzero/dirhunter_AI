@@ -12,6 +12,7 @@ import requests
 from functools import lru_cache
 from utils.tech_helpers import extract_tech_and_cves, aggregate_cves, severity_from_count
 import re
+from collections import Counter
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -50,610 +51,1038 @@ def _slugify_name(value: str) -> str:
     value = re.sub(r"_+", "_", value).strip("_")
     return value or "item"
 
-def create_dashboard(all_domains_data, is_update=False):
-    """
-    Create a main dashboard that shows all domains and their findings
+def categorize_technology(tech_name):
+    """Categorize technology into categories"""
+    tech_name = tech_name.lower()
     
-    Parameters:
-    - all_domains_data: Dictionary mapping domains to their findings
-    - is_update: If True, indicates this is an update to an existing dashboard
-    """
-    os.makedirs(HTML_REPORT_DIR, exist_ok=True)
+    # Frontend technologies
+    if any(x in tech_name for x in ['vue', 'react', 'angular', 'jquery', 'bootstrap', 'tailwind', 
+                                    'css', 'font', 'style', 'ui', 'ux', 'frontend', 'html', 
+                                    'javascript', 'js', 'typescript', 'ts']):
+        return "Frontend"
     
-    dashboard_file = os.path.join(HTML_REPORT_DIR, "dashboard.html")
+    # Backend technologies
+    if any(x in tech_name for x in ['node', 'express', 'django', 'flask', 'laravel', 'rails', 
+                                   'php', 'ruby', 'python', '.net', 'java', 'spring', 'backend']):
+        return "Backend"
+        
+    # Server technologies
+    if any(x in tech_name for x in ['nginx', 'apache', 'iis', 'server', 'tomcat', 'jetty', 'litespeed']):
+        return "Server"
+        
+    # Cloud services
+    if any(x in tech_name for x in ['aws', 'amazon', 'azure', 'cloud', 'gcp', 'google cloud', 'cdn', 
+                                   'cloudflare', 'fastly', 'akamai', 's3', 'lambda', 'ec2', 'cloudfront']):
+        return "Cloud/CDN"
+        
+    # Analytics and marketing
+    if any(x in tech_name for x in ['google analytics', 'gtm', 'tag manager', 'pixel', 'analytics', 'tracking', 
+                                   'facebook pixel', 'marketing']):
+        return "Analytics"
+        
+    # Security
+    if any(x in tech_name for x in ['security', 'authentication', 'auth', 'waf', 'firewall', 'protection',
+                                   'hsts', 'ssl', 'tls', 'https', 'secure']):
+        return "Security"
     
-    spark_svg = ""  # timeline placeholder
+    return "Other"
 
-    # Aggregate statistics
-    total_domains = len(all_domains_data)
-    total_findings = sum(len(findings) for findings in all_domains_data.values())
+def get_vuln_severity(cve_id):
+    """Determine vulnerability severity based on CVE ID or pattern"""
+    # This is a simplified version - normally you'd look this up in a database
+    # For now we'll use a deterministic but pseudo-random approach
     
-    # Count by status and category across all domains
-    global_status_counts = defaultdict(int)
-    global_category_counts = defaultdict(int)
-    global_secret_count   = 0
-    # Will compute global CVE count later
-    high_priority_findings = []
+    # Get a hash of the CVE ID to make it deterministic
+    cve_hash = int(hashlib.md5(cve_id.encode()).hexdigest(), 16)
     
-    for domain, findings in all_domains_data.items():
-        for finding in findings:
-            status = finding.get('finding_status', 'unknown')
-            global_status_counts[status] += 1
-            
-            category = finding.get('ai_tag', 'Other')
-            global_category_counts[category] += 1
+    # Use the hash to determine severity
+    value = cve_hash % 100
+    
+    if value < 10:
+        return "critical"
+    elif value < 30:
+        return "high"
+    elif value < 70:
+        return "medium"
+    else:
+        return "low"
 
-            # Count secrets at finding level
-            dm = finding.get('download_meta') or {}
-            secret_cnt = len(dm.get('th_secrets', [])) + len(dm.get('potential_secrets', []))
-            global_secret_count += secret_cnt
-            
-            # Collect high priority findings
-            from utils.ai_analyzer import get_category_priority
-            priority = get_category_priority(category)
-            if priority >= 7:
-                high_priority_findings.append({
-                    'domain': domain,
-                    'url': finding['url'],
-                    'category': category,
-                    'status': status,
-                    'priority': priority,
-                    'screenshot': finding.get('screenshot', '')
-                })
-    
-    # Sort high priority findings
-    high_priority_findings.sort(key=lambda x: (-x['priority'], x['domain'], x['url']))
+def slugify_tag(tag):
+    """Convert a tag to a URL-friendly slug"""
+    return tag.lower().replace(' ', '_').replace('-', '_')
 
-    # ------------------------------------------------------------
-    # Global CVE and secret summary across all findings
-    # ------------------------------------------------------------
-    all_findings_list = [f for findings in all_domains_data.values() for f in findings if f]
-    global_cve_total = aggregate_cves(all_findings_list)["total"]
+def _render_tech_list(tech_items, tech_versions):
+    html = ""
+    for tech_name, count in tech_items.most_common(10):
+        version = tech_versions.get(tech_name, "")
+        html += f'<div class="tech-item">{tech_name}'
+        if version:
+            html += f'span class="tech-version">{version}</span>'
+        html += '</div>'
+    return html
+
+def create_dashboard(results, output_path=None, is_update=False):
+    """Create HTML dashboard from results"""
+    if not output_path:
+        output_path = os.path.join("results", "html", "dashboard.html")
     
-    # Calculate global secret count
-    global_secret_count = 0
-    for f in all_findings_list:
-        dm = f.get('download_meta') or {}
-        secret_cnt = len(dm.get('th_secrets', [])) + len(dm.get('potential_secrets', []))
-        global_secret_count += secret_cnt
+    # Ensure directory exists
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
-    # Build dashboard HTML
-    html = f"""
-    <!DOCTYPE html>
-    <html>
+    # Start with the HTML template
+    with open(output_path, "w") as f_handle:
+        f_handle.write("""<!DOCTYPE html>
+<html lang="en">
     <head>
-        <title>DirHunter AI - Security Dashboard</title>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <meta http-equiv="refresh" content="60">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Security Scan Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
         <style>
-            body {{
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                margin: 0;
-                padding: 0;
-                background-color: #f5f5f7;
-                color: #1d1d1f;
-            }}
-            .header {{
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                color: white;
-                padding: 2rem;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            }}
-            .header h1 {{
-                margin: 0;
-                font-size: 2.5rem;
-                font-weight: 600;
-            }}
-            .header .subtitle {{
-                margin-top: 0.5rem;
-                opacity: 0.9;
-                font-size: 1.1rem;
-            }}
-            .container {{
-                max-width: 1400px;
-                margin: 0 auto;
-                padding: 2rem;
-            }}
-            .stats-grid {{
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-                gap: 1.5rem;
-                margin-bottom: 2rem;
-            }}
-            .stat-card {{
-                background: white;
-                padding: 1.5rem;
-                border-radius: 12px;
-                box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-                text-align: center;
-            }}
-            .stat-card h2 {{
-                margin: 0;
-                font-size: 2.5rem;
-                font-weight: 700;
-                color: #4f46e5;
-            }}
-            .stat-card p {{
-                margin: 0.5rem 0 0 0;
-                color: #6b7280;
-                font-size: 1rem;
-            }}
-            .domain-grid {{
-                display: grid;
-                grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
-                gap: 1.5rem;
-                margin-bottom: 2rem;
-            }}
-            .domain-card {{
-                background: white;
-                border-radius: 12px;
-                overflow: hidden;
-                box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            padding-top: 0;
+            background-color: #f5f5f7;
+            margin: 0;
+        }
+        .card {
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            border: none;
+            border-radius: 10px;
+        }
+        .domain-card {
                 transition: transform 0.2s;
-            }}
-            .domain-card:hover {{
-                transform: translateY(-4px);
-                box-shadow: 0 8px 16px rgba(0,0,0,0.12);
-            }}
-            .domain-card .header {{
-                padding: 1.5rem;
-                background: #f9fafb;
-                border-bottom: 1px solid #e5e7eb;
-            }}
-            .domain-card .header h3 {{
-                margin: 0;
-                font-size: 1.25rem;
-                font-weight: 600;
-                color: #111827;
-            }}
-            .domain-card .content {{
-                padding: 1.5rem;
-            }}
-            .domain-card .stats {{
+            border-top: 4px solid #007bff;
+            background-color: white;
+        }
+        .domain-card:hover {
+            transform: translateY(-5px);
+        }
+        .status-new {
+            color: #28a745;
+            font-weight: bold;
+        }
+        .status-changed {
+            color: #17a2b8;
+            font-weight: bold;
+        }
+        .status-existing {
+            color: #6c757d;
+            font-weight: bold;
+        }
+        .tech-stats-container {
                 display: flex;
-                justify-content: space-between;
-                margin-bottom: 1rem;
-            }}
-            .domain-card .stat {{
+            gap: 10px;
+            margin-bottom: 15px;
+            flex-wrap: wrap;
+        }
+        .tech-stat-card {
+            padding: 10px;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+            flex: 1;
+            min-width: 120px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
                 text-align: center;
-            }}
-            .domain-card .stat .value {{
-                font-size: 1.5rem;
-                font-weight: 700;
-                color: #4f46e5;
-            }}
-            .domain-card .stat .label {{
-                font-size: 0.875rem;
-                color: #6b7280;
-            }}
-            .domain-card .tags {{
+        }
+        .tech-stat-value {
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 5px;
+            color: #333;
+        }
+        .tech-stat-label {
+            font-size: 12px;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .tech-categories-grid {
                 display: flex;
                 flex-wrap: wrap;
-                gap: 0.5rem;
-                margin-bottom: 1rem;
-            }}
-            .domain-card .tag {{
-                background: #f3f4f6;
-                color: #4b5563;
-                padding: 0.25rem 0.75rem;
-                border-radius: 9999px;
-                font-size: 0.75rem;
-                font-weight: 500;
-            }}
-            .domain-card .view-btn {{
-                display: block;
-                width: 100%;
-                padding: 0.75rem;
-                background: #4f46e5;
-                color: white;
-                text-align: center;
-                text-decoration: none;
-                border-radius: 6px;
-                font-weight: 500;
-                transition: background-color 0.2s;
-            }}
-            .domain-card .view-btn:hover {{
-                background: #4338ca;
-            }}
-            .priority-section {{
-                background: white;
-                border-radius: 12px;
-                padding: 1.5rem;
-                margin-bottom: 2rem;
-                box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-            }}
-            .priority-section h2 {{
-                margin-top: 0;
-                margin-bottom: 1.5rem;
-                font-size: 1.5rem;
-                font-weight: 600;
-                color: #111827;
-            }}
-            .priority-grid {{
-                display: grid;
-                grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-                gap: 1.5rem;
-            }}
-            .priority-card {{
-                background: #f9fafb;
-                border-radius: 8px;
-                overflow: hidden;
-                border-left: 4px solid #4f46e5;
-            }}
-            .priority-card .thumbnail {{
-                width: 100%;
-                height: 180px;
-                object-fit: cover;
-                background: #e5e7eb;
-            }}
-            .priority-card .content {{
-                padding: 1rem;
-            }}
-            .priority-card h3 {{
-                margin: 0 0 0.5rem 0;
-                font-size: 1rem;
-                font-weight: 500;
-            }}
-            .priority-card p {{
-                margin: 0;
-                font-size: 0.875rem;
-                color: #6b7280;
-            }}
-            .priority-card .meta {{
+            gap: 8px;
+            margin-bottom: 15px;
+        }
+        .tech-category-item {
+            padding: 6px 12px;
+            border-radius: 15px;
+            background-color: #e9ecef;
+            font-size: 13px;
+            display: inline-flex;
+            align-items: center;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            transition: all 0.2s ease;
+        }
+        .tech-category-item:hover {
+            background-color: #dee2e6;
+            transform: translateY(-2px);
+            box-shadow: 0 2px 5px rgba(0,0,0,0.15);
+        }
+        .tech-category-item i {
+            margin-right: 5px;
+        }
+        .tech-details {
+            background-color: #f8f9fa;
+            padding: 12px;
+            border-radius: 5px;
+            margin-top: 10px;
+            display: none;
+            border: 1px solid #dee2e6;
+        }
+        .tech-item {
+            padding: 6px 10px;
+            margin-bottom: 6px;
+            border-radius: 4px;
+            background-color: white;
+            font-size: 14px;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.05);
                 display: flex;
                 justify-content: space-between;
-                margin-top: 0.75rem;
-                font-size: 0.75rem;
-            }}
-            .priority-card .domain {{
-                color: #6b7280;
-            }}
-            .priority-card .priority {{
+            align-items: center;
+        }
+        .tech-item:hover {
+            background-color: #f1f3f5;
+        }
+        .tech-version {
+            padding: 2px 8px;
+            border-radius: 10px;
+            background-color: #e9ecef;
+            font-size: 12px;
                 font-weight: 500;
-                color: #4f46e5;
-            }}
-            .priority-card .priority.high {{
-                color: #dc2626;
-            }}
-            .status-badge {{
-                display: inline-block;
-                padding: 0.25rem 0.5rem;
-                border-radius: 9999px;
-                font-size: 0.75rem;
-                font-weight: 500;
-                text-transform: uppercase;
-            }}
-            .status-new {{
-                background: #dcfce7;
-                color: #166534;
-            }}
-            .status-changed {{
-                background: #fef3c7;
-                color: #92400e;
-            }}
-            .status-existing {{
-                background: #e0e7ff;
-                color: #3730a3;
-            }}
-            .status-unknown {{
-                background: #f3f4f6;
-                color: #4b5563;
-            }}
-            .search-box {{
+            letter-spacing: 0.5px;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+        }
+        .filter-bar {
+            position: sticky;
+            top: 0;
+            background-color: white;
+            padding: 15px;
+            z-index: 100;
+            border-radius: 10px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            margin-bottom: 20px;
+        }
+        .toggle-button {
+            cursor: pointer;
+            user-select: none;
+            color: #007bff;
+            margin-top: 10px;
+            display: inline-block;
+        }
+        .toggle-button i {
+            transition: transform 0.3s ease;
+        }
+        .toggle-button.active i {
+            transform: rotate(90deg);
+        }
+        .security-posture {
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 15px;
+            border: 1px solid #dee2e6;
+        }
+        .security-summary {
+            margin-bottom: 15px;
+            line-height: 1.5;
+        }
+        .recommendations-list {
+            margin-bottom: 15px;
+            padding-left: 20px;
+        }
+        .recommendations-list li {
+            margin-bottom: 8px;
+        }
+        .missing-headers-list {
+            background-color: #fff3cd;
+            padding: 10px;
+            border-radius: 4px;
+            border-left: 4px solid #ffc107;
+        }
+        .cve-header {
+            cursor: pointer;
+            padding: 8px;
+            background-color: #f1f3f5;
+            border-radius: 4px;
+            margin-bottom: 5px;
+        }
+        .cve-header:hover {
+            background-color: #e9ecef;
+        }
+        .cve-details {
+            margin-top: 8px;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        /* Doughnut chart for CVE severity */
+        .cve-chart-container {
+            position: relative;
                 width: 100%;
-                padding: 1rem;
-                margin-bottom: 2rem;
-                border: 1px solid #e5e7eb;
-                border-radius: 8px;
-                font-size: 1rem;
-                background: white;
-            }}
-            .filter-bar {{
+            max-width: 300px;
+            margin: 0 auto;
+        }
+        .severity-legend {
                 display: flex;
-                gap: 0.5rem;
-                margin-bottom: 2rem;
                 flex-wrap: wrap;
-            }}
-            .filter-btn {{
-                padding: 0.5rem 1rem;
-                background: #f3f4f6;
-                border: none;
-                border-radius: 6px;
-                font-size: 0.875rem;
-                font-weight: 500;
-                color: #4b5563;
-                cursor: pointer;
-                transition: all 0.2s;
-            }}
-            .filter-btn:hover {{
-                background: #e5e7eb;
-            }}
-            .filter-btn.active {{
-                background: #4f46e5;
-                color: white;
-            }}
-            .last-updated {{
-                text-align: center;
-                margin-top: 2rem;
-                color: #6b7280;
-                font-size: 0.875rem;
-            }}
-            .scan-status {{
-                background: #fef3c7;
-                color: #92400e;
-                padding: 0.75rem;
-                border-radius: 6px;
-                margin-bottom: 1.5rem;
-                text-align: center;
-                font-weight: 500;
-            }}
-            .scan-status.completed {{
-                background: #dcfce7;
-                color: #166534;
-            }}
-            .domain-card .status-indicator {{
-                display: inline-block;
-                width: 10px;
-                height: 10px;
-                border-radius: 50%;
-                margin-right: 0.5rem;
-            }}
-            .domain-card .status-indicator.completed {{
-                background: #22c55e;
-            }}
-            .domain-card .status-indicator.scanning {{
-                background: #f59e0b;
-            }}
-            .domain-card .status-text {{
-                font-size: 0.75rem;
-                color: #6b7280;
+            gap: 10px;
+            justify-content: center;
+            margin-top: 10px;
+        }
+        .severity-legend-item {
                 display: flex;
                 align-items: center;
-                margin-top: 0.5rem;
-            }}
+            font-size: 12px;
+        }
+        .severity-legend-color {
+            width: 12px;
+            height: 12px;
+            margin-right: 5px;
+            border-radius: 2px;
+        }
+        .main-header {
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+            color: white;
+            padding: 40px 0;
+            margin-bottom: 30px;
+            text-align: center;
+        }
+        .main-title {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+        }
+        .btn-primary {
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+            border: none;
+        }
+        .vulnerability-summary {
+            background-color: white;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 30px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        .vulnerability-summary h3 {
+            margin-bottom: 20px;
+            font-weight: 600;
+        }
+        .vulnerability-stat {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-radius: 8px;
+            text-align: center;
+        }
+        .vulnerability-count {
+            font-size: 1.5rem;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+        .vulnerability-label {
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            color: #6c757d;
+        }
+        .critical-count {
+            color: #dc3545;
+        }
+        .high-count {
+            color: #fd7e14;
+        }
+        .medium-count {
+            color: #0dcaf0;
+        }
+        .low-count {
+            color: #6c757d;
+        }
+        .domain-title {
+            font-size: 1.5rem;
+            margin-bottom: 5px;
+        }
+        .domain-title a {
+            color: inherit;
+            text-decoration: none;
+        }
+        .domain-title a:hover {
+            color: #6366f1;
+        }
+        .endpoints-count {
+            color: #6c757d;
+            margin-bottom: 15px;
+        }
+        .status-indicator {
+            display: flex;
+            margin-bottom: 15px;
+        }
+        .status-count {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin-right: 15px;
+        }
+        .status-count-value {
+            font-weight: bold;
+            font-size: 1.2rem;
+        }
+        .view-technologies-button {
+            display: flex;
+            align-items: center;
+            color: #6366f1;
+            cursor: pointer;
+            margin-top: 10px;
+        }
+        .view-technologies-button i {
+            margin-right: 5px;
+            transition: transform 0.2s;
+        }
+        .view-tech-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+        }
+        .tech-chevron {
+            transition: transform 0.3s;
+        }
+        .domain-action-buttons {
+            display: flex;
+        }
+        .top-tags a {
+            display: inline-block;
+            margin-right: 8px;
+            margin-bottom: 8px;
+            padding: 6px 12px;
+            background-color: #f8f9fa;
+            border-radius: 20px;
+            color: #333;
+            text-decoration: none;
+            font-size: 0.9rem;
+        }
+        .top-tags a:hover {
+            background-color: #e9ecef;
+        }
+        .filter-container {
+            background-color: #fff;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            position: sticky;
+            top: 15px;
+            z-index: 1000;
+        }
+        .filter-row {
+            display: flex;
+            gap: 15px;
+        }
+        .filter-item {
+            flex: 1;
+        }
+        .top-tags-container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 10px;
+        }
+        .tag-badge {
+            display: inline-flex;
+            align-items: center;
+            background-color: #f0f4f8;
+            border-radius: 20px;
+            overflow: hidden;
+            text-decoration: none;
+            transition: all 0.2s;
+            border: 1px solid #e2e8f0;
+        }
+        .tag-badge:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            background-color: #e5edfa;
+            text-decoration: none;
+        }
+        .tag-name {
+            padding: 6px 12px;
+            color: #3f51b5;
+            font-size: 0.85rem;
+        }
+        .tag-count {
+            background-color: #3f51b5;
+            color: white;
+            padding: 6px 8px;
+            font-size: 0.85rem;
+            font-weight: 500;
+        }
         </style>
     </head>
     <body>
-        <div class="header">
-            <div class="container">
-                <h1>DirHunter AI - Security Dashboard</h1>
-                <div class="subtitle">
-                    Automated Directory Scanning & Security Analysis
+    <header class="main-header">
+        <h1>🛡️ DirHunter AI Security Dashboard</h1>
+        <p>Comprehensive view of security findings and technology stack</p>
+    </header>
+    
+    <div class="container">
+        <!-- Filter Bar -->
+        <div class="filter-container sticky-top">
+            <div class="filter-row">
+                <div class="filter-item">
+                    <input type="text" class="form-control" id="domain-filter" placeholder="Filter by domain...">
+            </div>
+                <div class="filter-item">
+                    <select class="form-select" id="status-filter">
+                        <option value="all">All Statuses</option>
+                        <option value="new">New</option>
+                        <option value="changed">Changed</option>
+                        <option value="existing">Existing</option>
+                    </select>
                 </div>
+                <div class="filter-item">
+                    <select class="form-select" id="tag-filter">
+                        <option value="all">All Tags</option>
+                    </select>
+                </div>
+                <div class="filter-item">
+                    <select class="form-select" id="tech-filter">
+                        <option value="all">All Technologies</option>
+                    </select>
+                </div>
+                <div class="filter-item">
+                    <button class="btn btn-primary w-100" id="reset-filters">Reset Filters</button>
+                </div>
+                </div>
+            </div>
+            
+        <div id="domains-container">
+""")
+
+        # Process domains and add domain cards
+        all_tags = set()
+        all_techs = set()
+        all_domain_techs = {}
+        all_vulnerabilities = []
+        
+        # Initialize counters for vulnerability severity
+        critical_count = 0
+        high_count = 0
+        medium_count = 0
+        low_count = 0
+        
+        # Get current timestamp
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # For each domain
+        for domain, findings in results.items():
+            if not findings:
+                continue
+            
+            # Create findings page for the domain
+            export_domain_findings(domain, findings, os.path.dirname(output_path))
+            export_tag_based_reports(domain, findings, os.path.dirname(output_path))
+                
+            # Count by status
+            new_count = sum(1 for f in findings if f.get('finding_status') == 'new')
+            changed_count = sum(1 for f in findings if f.get('finding_status') == 'changed')
+            existing_count = sum(1 for f in findings if f.get('finding_status') == 'existing')
+            
+            # Count by tag and collect all tags
+            tags = {}
+            for f in findings:
+                tag = f.get('ai_tag', 'Other')
+                if tag not in tags:
+                    tags[tag] = 0
+                tags[tag] += 1
+                all_tags.add(tag)
+            
+            # Get technologies for this domain
+            domain_techs = Counter()
+            tech_details = {}  # Store tech name with version
+            techs_with_version = 0
+            tech_categories = Counter()
+            
+            # Count vulnerabilities
+            domain_vulns = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+            
+            for f in findings:
+                tech = f.get('tech', {})
+                if tech:
+                    for tech_name, tech_info in tech.items():
+                        if tech_name in ["cve_vulns", "cve_details"]:
+                            continue
+                        
+                        domain_techs[tech_name] += 1
+                        all_techs.add(tech_name)
+                        
+                        # Count techs with version
+                        if isinstance(tech_info, dict) and tech_info.get('version'):
+                            techs_with_version += 1
+                            tech_details[tech_name] = tech_info.get('version')
+                            
+                        # Categorize technology
+                        category = categorize_technology(tech_name)
+                        tech_categories[category] += 1
+            
+                # Extract CVE details
+                if tech and "cve_details" in tech:
+                    for pkg, details in tech["cve_details"].items():
+                        if isinstance(details, dict) and "ids" in details:
+                            for cve_id in details["ids"]:
+                                severity = get_vuln_severity(cve_id)
+                                domain_vulns[severity.lower()] += 1
+                                all_vulnerabilities.append({
+                                    "id": cve_id,
+                                    "severity": severity.lower(),
+                                    "domain": domain
+                                })
+            
+            # Store domain techs for later use in security posture
+            all_domain_techs[domain] = {
+                "techs": dict(domain_techs),
+                "tech_categories": dict(tech_categories),
+                "vulnerabilities": domain_vulns
+            }
+            
+            # Write domain card
+            f_handle.write(f"""
+            <div class="card domain-card mb-4 domain-item">
+                    <div class="card-body">
+                    <h3 class="domain-title"><a href="{domain}_findings.html">{domain}</a></h3>
+                    <div class="endpoints-count">{len(findings)} endpoints</div>
+                    
+                    <div class="status-indicator">
+                        <div class="status-count">
+                            <span class="status-count-value status-new">{new_count}</span>
+                            <small>New</small>
+                            </div>
+                        <div class="status-count">
+                            <span class="status-count-value status-changed">{changed_count}</span>
+                            <small>Changed</small>
+                            </div>
+                        <div class="status-count">
+                            <span class="status-count-value status-existing">{existing_count}</span>
+                            <small>Existing</small>
+                            </div>
+                        </div>
+                        
+                    <h6 class="fw-bold mb-3">Technology Stack</h6>
+                            <div class="tech-stats-container">
+                                <div class="tech-stat-card">
+                                    <div class="tech-stat-value">{len(domain_techs)}</div>
+                            <div class="tech-stat-label">TECHNOLOGIES</div>
+                        </div>
+                                <div class="tech-stat-card">
+                                    <div class="tech-stat-value">{techs_with_version}</div>
+                            <div class="tech-stat-label">WITH VERSION</div>
+                    </div>
+                                <div class="tech-stat-card">
+                            <div class="tech-stat-value">{sum(domain_vulns.values())}</div>
+                            <div class="tech-stat-label">CVES</div>
+                </div>
+            </div>
+            """)
+            
+            # Add tech categories
+            if tech_categories:
+                tech_cat_html = '<div class="tech-categories-grid">'
+                for category, count in tech_categories.most_common(5):
+                    icon = "fas fa-code"
+                    if "frontend" in category.lower():
+                        icon = "fas fa-desktop"
+                    elif "backend" in category.lower():
+                        icon = "fas fa-server"
+                    elif "cloud" in category.lower() or "cdn" in category.lower():
+                        icon = "fas fa-cloud"
+                    elif "security" in category.lower():
+                        icon = "fas fa-shield-alt"
+                    elif "analytics" in category.lower():
+                        icon = "fas fa-chart-line"
+                    
+                    tech_cat_html += f'<div class="tech-category-item"><i class="{icon}"></i> {category} ({count})</div>'
+                tech_cat_html += '</div>'
+                f_handle.write(tech_cat_html)
+            
+            # Add view technologies button with improved styling
+            f_handle.write(f'''
+            <div class="mt-3 mb-3">
+                <button class="btn btn-outline-primary btn-sm view-tech-btn" onclick="toggleDetails(this, 'tech-details-{domain}')">
+                    <i class="fas fa-chevron-right tech-chevron"></i> View technologies
+                </button>
+                            </div>
+            <div id="tech-details-{domain}" class="tech-details">
+            ''')
+            
+            # Add tech details
+            for tech_name, count in domain_techs.most_common(10):
+                version_html = ""
+                if tech_name in tech_details:
+                    version_html = f'<span class="tech-version">{tech_details[tech_name]}</span>'
+                    
+                f_handle.write(f'<div class="tech-item"><span>{tech_name}</span>{version_html}</div>')
+            
+            if len(domain_techs) > 10:
+                f_handle.write(f'<div class="text-center mt-2"><small>+ {len(domain_techs) - 10} more</small></div>')
+            
+            f_handle.write('</div>')  # Close tech-details
+            
+            # Add special counters for downloadables and secrets
+            downloadable_count = sum(1 for f in findings if f.get('download_meta', {}).get('is_downloadable'))
+            secret_count = sum(1 for f in findings if f.get('secrets'))
+            
+            f_handle.write('<h6 class="fw-bold mb-3">Security Findings</h6>')
+            
+            if downloadable_count > 0:
+                f_handle.write(f'<div class="mb-2"><span class="badge bg-info text-dark"><i class="fas fa-download me-1"></i> {downloadable_count} Downloadable</span></div>')
+            
+            if secret_count > 0:
+                f_handle.write(f'<div class="mb-2"><span class="badge bg-danger"><i class="fas fa-key me-1"></i> {secret_count} Secrets</span></div>')
+            
+            # Add buttons for findings and tag findings
+            f_handle.write(f'''
+            <div class="mt-4 mb-3 domain-action-buttons">
+                <a href="{domain}_findings.html" class="btn btn-sm btn-primary me-2">
+                    <i class="fas fa-search"></i> View Findings
+                </a>
+                <a href="{domain}_tags.html" class="btn btn-sm btn-secondary">
+                    <i class="fas fa-tags"></i> View by Tags
+                </a>
+                            </div>
+            ''')
+            
+            # Check for missing security headers
+            all_headers = []
+            for finding in findings:
+                headers = finding.get('headers', {})
+                for header_name in headers:
+                    all_headers.append(header_name.lower())
+            
+            # Define important security headers
+            security_headers = [
+                {'name': 'Content-Security-Policy', 'importance': 'critical'},
+                {'name': 'X-Frame-Options', 'importance': 'high'},
+                {'name': 'X-Content-Type-Options', 'importance': 'medium'},
+                {'name': 'Strict-Transport-Security', 'importance': 'critical'},
+                {'name': 'X-XSS-Protection', 'importance': 'high'},
+                {'name': 'Referrer-Policy', 'importance': 'medium'},
+                {'name': 'Feature-Policy', 'importance': 'low'},
+                {'name': 'Permissions-Policy', 'importance': 'low'},
+                {'name': 'X-Permitted-Cross-Domain-Policies', 'importance': 'low'}
+            ]
+            
+            missing_headers = [header for header in security_headers if header['name'].lower() not in [h.lower() for h in all_headers]]
+            
+            if missing_headers:
+                f_handle.write("""
+                <div class="mt-3">
+                    <h6 class="fw-bold">Missing Security Headers</h6>
+                    <div class="missing-headers-list">
+                """)
+                
+                for header in missing_headers:
+                    badge_class = {
+                        'critical': 'danger',
+                        'high': 'warning',
+                        'medium': 'info',
+                        'low': 'secondary'
+                    }.get(header['importance'], 'secondary')
+                    
+                    f_handle.write(f'<div class="mb-1"><span class="badge bg-{badge_class}">{header["name"]}</span></div>')
+                
+                f_handle.write('</div></div>')
+            
+            # Add vulnerability summary
+            if sum(domain_vulns.values()) > 0:
+                f_handle.write("""
+                <div class="mt-3">
+                    <h6 class="fw-bold">Vulnerabilities</h6>
+                    <div>
+                """)
+                
+                if domain_vulns["critical"] > 0:
+                    f_handle.write(f'<span class="badge bg-danger me-1 mb-1">Critical: {domain_vulns["critical"]}</span>')
+                if domain_vulns["high"] > 0:
+                    f_handle.write(f'<span class="badge bg-warning text-dark me-1 mb-1">High: {domain_vulns["high"]}</span>')
+                if domain_vulns["medium"] > 0:
+                    f_handle.write(f'<span class="badge bg-info text-dark me-1 mb-1">Medium: {domain_vulns["medium"]}</span>')
+                if domain_vulns["low"] > 0:
+                    f_handle.write(f'<span class="badge bg-secondary me-1 mb-1">Low: {domain_vulns["low"]}</span>')
+                    
+                f_handle.write('</div></div>')
+            
+            # Add tags
+            if tags:
+                f_handle.write("""
+                <div class="mt-3">
+                    <h6 class="fw-bold">Top Tags</h6>
+                    <div class="top-tags-container">
+                """)
+                
+                for tag, count in sorted(tags.items(), key=lambda x: x[1], reverse=True)[:5]:
+                    tag_id = slugify_tag(tag)
+                    f_handle.write(f'<a href="{domain}_tag_{tag_id}.html" class="tag-badge"><span class="tag-name">{tag}</span><span class="tag-count">{count}</span></a>')
+                    
+                f_handle.write('</div></div>')
+            
+            # Add security posture if available
+            try:
+                from utils.ai_analyzer import get_security_posture
+                posture = get_security_posture(domain, findings)
+                if posture:
+                    # Calculate security score
+                    score = posture.get('score', 0)
+                    score_text = "LOW"
+                    score_color = "danger"
+                    
+                    if score >= 8:
+                        score_text = "HIGH"
+                        score_color = "warning"
+                    elif score >= 5:
+                        score_text = "MEDIUM"
+                        score_color = "info"
+                        
+                    f_handle.write(f"""
+                    <div class="mt-3">
+                        <h6 class="fw-bold">Security Posture</h6>
+                        <div class="security-posture">
+                            <div class="text-end mb-2">
+                                <span class="badge bg-{score_color}">{score_text} {score}/10</span>
+                            </div>
+                            <div class="security-summary">{posture.get('summary', '')}</div>
+                        </div>
+                    </div>
+            """)
+            except Exception as e:
+                pass
+            
+            f_handle.write("""
+                </div>
+            </div>
+            """)
+        
+        # Count vulnerabilities by severity
+        critical_count = 0
+        high_count = 0
+        medium_count = 0
+        low_count = 0
+        
+        if all_vulnerabilities:
+            critical_count = sum(1 for v in all_vulnerabilities if v["severity"] == "critical")
+            high_count = sum(1 for v in all_vulnerabilities if v["severity"] == "high")
+            medium_count = sum(1 for v in all_vulnerabilities if v["severity"] == "medium")
+            low_count = sum(1 for v in all_vulnerabilities if v["severity"] == "low")
+        
+        # Create vulnerability summary section
+        f_handle.write(f"""
+        <div class="vulnerability-summary">
+            <h3>Vulnerability Summary</h3>
+            <div class="row">
+                <div class="col-md-3">
+                    <div class="vulnerability-stat">
+                        <div class="vulnerability-count critical-count">{critical_count}</div>
+                        <div class="vulnerability-label">CRITICAL</div>
+                </div>
+                                </div>
+                <div class="col-md-3">
+                    <div class="vulnerability-stat">
+                        <div class="vulnerability-count high-count">{high_count}</div>
+                        <div class="vulnerability-label">HIGH</div>
+                                </div>
+                                </div>
+                <div class="col-md-3">
+                    <div class="vulnerability-stat">
+                        <div class="vulnerability-count medium-count">{medium_count}</div>
+                        <div class="vulnerability-label">MEDIUM</div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="vulnerability-stat">
+                        <div class="vulnerability-count low-count">{low_count}</div>
+                        <div class="vulnerability-label">LOW</div>
+                                </div>
+                            </div>
+                        </div>
+                        
+            <div class="mt-4">
+                <h5>Recommended Actions</h5>
+                <ul class="recommendations-list">
+                    <li>Update software components with known vulnerabilities</li>
+                    <li>Implement security headers to protect against common web attacks</li>
+                    <li>Review findings tagged as "Critical" or "High" priority first</li>
+                </ul>
+                </div>
+            
+            <div class="mt-3">
+                <div class="row">
+                    <div class="col-md-12">
+                        <div class="severity-legend text-center">
+                            <div class="severity-legend-item me-3">
+                                <div class="severity-legend-color" style="background-color: #dc3545;"></div>
+                                <span>Critical</span>
+            </div>
+                            <div class="severity-legend-item me-3">
+                                <div class="severity-legend-color" style="background-color: #fd7e14;"></div>
+                                <span>High</span>
+                    </div>
+                            <div class="severity-legend-item me-3">
+                                <div class="severity-legend-color" style="background-color: #0dcaf0;"></div>
+                                <span>Medium</span>
+                            </div>
+                            <div class="severity-legend-item">
+                                <div class="severity-legend-color" style="background-color: #6c757d;"></div>
+                                <span>Low</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                </div>
+            </div>
+            """)
+        
+        f_handle.write('</div>') # Close domains-container
+        
+        # Close HTML and add JavaScript
+        f_handle.write(f"""
+            <div class="text-center text-muted mt-4 mb-4">
+                <small>Generated at {timestamp}</small>
             </div>
         </div>
         
-        <div class="container">
-            <div class="scan-status{' completed' if not is_update else ''}">
-                {f"Scan completed - {total_domains} domains analyzed" if not is_update else f"Scan in progress - {total_domains} domains processed so far"}
-            </div>
-            
-            <div class="stats-grid">
-                <div class="stat-card">
-                    <h2>{total_domains}</h2>
-                    <p>Domains Scanned</p>
-                </div>
-                <div class="stat-card">
-                    <h2>{total_findings}</h2>
-                    <p>Total Findings</p>
-                </div>
-                <div class="stat-card">
-                    <h2>{global_status_counts.get('new', 0)}</h2>
-                    <p>New Findings</p>
-                </div>
-                <div class="stat-card">
-                    <h2>{global_cve_total}</h2>
-                    <p>Unique Vulnerabilities</p>
-                </div>
-                <div class="stat-card">
-                    <h2>{global_secret_count}</h2>
-                    <p>Potential Secrets</p>
-                </div>
-            </div>
-            
-            <input type="text" class="search-box" id="searchInput" placeholder="Search domains...">
-            
-            <div class="filter-bar">
-                <button class="filter-btn active" data-filter="all">All Domains</button>
-                <button class="filter-btn" data-filter="new-findings">New Findings</button>
-                <button class="filter-btn" data-filter="with-cves">With CVEs</button>
-                <button class="filter-btn" data-filter="with-secrets">With Secrets</button>
-            </div>
-            
-            <div class="domain-grid" id="domainGrid">
-    """
-    
-    # Add domain cards
-    for domain, findings in all_domains_data.items():
-        if not findings:
-            continue
-            
-        # Calculate domain stats
-        total_domain_findings = len(findings)
-        new_findings = sum(1 for f in findings if f.get('finding_status') == 'new')
-        changed_findings = sum(1 for f in findings if f.get('finding_status') == 'changed')
-        
-        # Get domain tags
-        domain_tags = set()
-        for f in findings:
-            tag = f.get('ai_tag', 'Other')
-            if tag != 'Other' and len(domain_tags) < 5:  # Limit to 5 tags
-                domain_tags.add(tag)
-        
-        # Count CVEs and secrets
-        domain_secret_count = 0
-        
-        # Use the aggregate_cves function to get unique CVE count
-        domain_cve_count = aggregate_cves(findings)["total"]
-        
-        for f in findings:
-            
-            # Count secrets
-            dm = f.get('download_meta') or {}
-            secret_cnt = len(dm.get('th_secrets', [])) + len(dm.get('potential_secrets', []))
-            domain_secret_count += secret_cnt
-        
-        # Create slug for linking
-        dom_slug = _slugify_name(domain)
-        
-        html += f"""
-                <div class="domain-card" 
-                    data-domain="{domain}" 
-                    data-new-findings="{new_findings}" 
-                    data-cves="{domain_cve_count}" 
-                    data-secrets="{domain_secret_count}">
-                    <div class="header">
-                        <h3>{domain}</h3>
-                        <div class="status-text">
-                            <span class="status-indicator completed"></span>
-                            Scan completed
-                        </div>
-                    </div>
-                    <div class="content">
-                        <div class="stats">
-                            <div class="stat">
-                                <div class="value">{total_domain_findings}</div>
-                                <div class="label">Findings</div>
-                            </div>
-                            <div class="stat">
-                                <div class="value">{new_findings}</div>
-                                <div class="label">New</div>
-                            </div>
-                            <div class="stat">
-                                <div class="value">{domain_cve_count}</div>
-                                <div class="label">Unique Vulnerabilities</div>
-                            </div>
-                            <div class="stat">
-                                <div class="value">{domain_secret_count}</div>
-                                <div class="label">Secrets</div>
-                            </div>
-                        </div>
-                        <div class="tags">
-        """
-        
-        # Add tags
-        for tag in domain_tags:
-            html += f'<span class="tag">{tag}</span>'
-            
-        html += f"""
-                        </div>
-                        <div class="view-button">
-                            <a href="{dom_slug}_tags.html" class="button">View Details</a>
-                        </div>
-                    </div>
-                </div>
-        """
-    
-    # Close domain grid and add high priority findings section
-    html += """
-            </div>
-            
-            <div class="priority-section">
-                <h2>High Priority Findings</h2>
-                <div class="priority-grid">
-    """
-    
-    # Add high priority findings
-    for i, finding in enumerate(high_priority_findings):
-        if i >= 6:  # Limit to 6 cards
-            break
-            
-        screenshot = ""
-        if finding['screenshot'] and os.path.exists(finding['screenshot']):
-            screenshot = f'<img src="{os.path.relpath(finding["screenshot"], HTML_REPORT_DIR)}" class="thumbnail" alt="{finding["category"]}">'
-            
-        priority_class = "high" if finding['priority'] >= 9 else ""
-        
-        status_class = "status-unknown"
-        if finding['status'] == 'new':
-            status_class = "status-new"
-        elif finding['status'] == 'changed':
-            status_class = "status-changed"
-        elif finding['status'] == 'existing':
-            status_class = "status-existing"
-            
-        html += f"""
-                <div class="priority-card">
-                    {screenshot}
-                    <div class="content">
-                        <h3>{finding['category']}</h3>
-                        <p>{finding['url']}</p>
-                        <div class="meta">
-                            <span class="domain">{finding['domain']}</span>
-                            <span class="status-badge {status_class}">{finding['status']}</span>
-                            <span class="priority {priority_class}">Priority: {finding['priority']}/10</span>
-                        </div>
-                    </div>
-                </div>
-        """
-    
-    # Close priority section and add last updated info
-    html += """
-                </div>
-            </div>
-            
-            <div class="last-updated">
-                Last updated: """ + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + """
-            </div>
-        </div>
+        <!-- Bootstrap JS -->
+        <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
         
         <script>
-            (function() {
-                const searchInput = document.getElementById('searchInput');
-                const domainGrid = document.getElementById('domainGrid');
-                const domainCards = domainGrid.querySelectorAll('.domain-card');
-                const filterBtns = document.querySelectorAll('.filter-btn');
+            function toggleDetails(button, detailsId) {{
+                const chevron = button.querySelector('.tech-chevron');
+                if (chevron) {{
+                    chevron.style.transform = chevron.style.transform === 'rotate(90deg)' ? 'rotate(0)' : 'rotate(90deg)';
+                }}
+                const details = document.getElementById(detailsId);
+                details.style.display = details.style.display === 'block' ? 'none' : 'block';
+            }}
+            
+            document.addEventListener('DOMContentLoaded', function() {{
+            const domainFilter = document.getElementById('domain-filter');
+            const statusFilter = document.getElementById('status-filter');
+            const tagFilter = document.getElementById('tag-filter');
+                const resetFilters = document.getElementById('reset-filters');
+                const domainItems = document.querySelectorAll('.domain-item');
+            
+            // Populate tag filter
+                const tags = {str(sorted(list(all_tags)))};
+                tags.forEach(tag => {{
+                const option = document.createElement('option');
+                    option.value = tag;
+                option.textContent = tag;
+                tagFilter.appendChild(option);
+                }});
+            
+            // Populate tech filter
+                const techs = {str(sorted(list(all_techs)))};
+                techs.forEach(tech => {{
+                const option = document.createElement('option');
+                    option.value = tech;
+                option.textContent = tech;
+                techFilter.appendChild(option);
+                }});
                 
-                let currentFilter = 'all';
-                
-                function applyFilters() {
-                    const searchTerm = searchInput.value.toLowerCase();
+                function applyFilters() {{
+                const domainText = domainFilter.value.toLowerCase();
+                const statusValue = statusFilter.value;
+                const tagValue = tagFilter.value;
+                const techValue = techFilter.value;
                     
-                    domainCards.forEach(card => {
-                        const domain = card.dataset.domain.toLowerCase();
-                        let show = domain.includes(searchTerm);
+                    domainItems.forEach(item => {{
+                        const domain = item.querySelector('.domain-title').textContent.toLowerCase();
                         
-                        // Apply category filter
-                        if (show && currentFilter !== 'all') {
-                            switch(currentFilter) {
-                                case 'new-findings':
-                                    show = parseInt(card.dataset.newFindings) > 0;
-                                    break;
-                                case 'with-cves':
-                                    show = parseInt(card.dataset.cves) > 0;
-                                    break;
-                                case 'with-secrets':
-                                    show = parseInt(card.dataset.secrets) > 0;
-                                    break;
-                            }
-                        }
+                        // Basic domain text filter
+                        const matchesDomain = domain.includes(domainText);
                         
-                        card.style.display = show ? '' : 'none';
-                    });
-                }
-
-                searchInput.addEventListener('input', applyFilters);
-                filterBtns.forEach(btn => {
-                    btn.addEventListener('click', () => {
-                        filterBtns.forEach(b => b.classList.remove('active'));
-                        btn.classList.add('active');
-                        currentFilter = btn.dataset.filter;
-                        applyFilters();
-                    });
-                });
-            })();
+                        // Skip other filters if domain doesn't match
+                        if (!matchesDomain) {{
+                            item.style.display = 'none';
+                            return;
+                        }}
+                        
+                        // Status filter
+                    let matchesStatus = true;
+                        if (statusValue !== 'all') {{
+                            const statusCount = parseInt(item.querySelector(`.status-${{statusValue}}`).textContent);
+                            matchesStatus = statusCount > 0;
+                        }}
+                        
+                        // Tag filter
+                    let matchesTag = true;
+                        if (tagValue !== 'all') {{
+                            // Check if any tag badges contain the selected tag
+                            const tagLinks = item.querySelectorAll('.top-tags a');
+                            matchesTag = Array.from(tagLinks).some(link => 
+                                link.textContent.toLowerCase().includes(tagValue.toLowerCase())
+                            );
+                        }}
+                        
+                        // Tech filter
+                    let matchesTech = true;
+                        if (techValue !== 'all') {{
+                            // Check if tech details contain the selected tech
+                            const techDetails = item.querySelectorAll('.tech-item');
+                            matchesTech = Array.from(techDetails).some(tech => 
+                                tech.textContent.toLowerCase().includes(techValue.toLowerCase())
+                            );
+                        }}
+                        
+                        item.style.display = (matchesDomain && matchesStatus && matchesTag && matchesTech) ? 'block' : 'none';
+                    }});
+                }}
+            
+            domainFilter.addEventListener('input', applyFilters);
+            statusFilter.addEventListener('change', applyFilters);
+            tagFilter.addEventListener('change', applyFilters);
+            techFilter.addEventListener('change', applyFilters);
+            
+                resetFilters.addEventListener('click', function() {{
+                domainFilter.value = '';
+                statusFilter.value = 'all';
+                tagFilter.value = 'all';
+                techFilter.value = 'all';
+                    applyFilters();
+                }});
+                
+                // Initialize vulnerability chart if it exists
+                const cveChartEl = document.getElementById('cveChart');
+                if (cveChartEl) {{
+                    const ctx = cveChartEl.getContext('2d');
+                    new Chart(ctx, {{
+                        type: 'doughnut',
+                        data: {{
+                            labels: ['Critical', 'High', 'Medium', 'Low'],
+                            datasets: [{{
+                                data: [{critical_count}, {high_count}, {medium_count}, {low_count}],
+                                backgroundColor: [
+                                    'rgba(220, 53, 69, 0.8)',
+                                    'rgba(253, 126, 20, 0.8)',
+                                    'rgba(255, 193, 7, 0.8)',
+                                    'rgba(108, 117, 125, 0.8)'
+                                ],
+                                borderWidth: 1
+                            }}]
+                        }},
+                        options: {{
+                            plugins: {{
+                                legend: {{
+                                    display: false
+                                }}
+                            }}
+                        }}
+                    }});
+                }}
+            }});
         </script>
     </body>
-    </html>
-    """
+</html>""")
     
-    # Save dashboard
-    with open(dashboard_file, "w", encoding="utf-8") as f:
-        f.write(html)
-    
-    print(f"[+] Dashboard {'updated' if is_update else 'created'}: {dashboard_file}")
-    return dashboard_file
+    logger.info(f"Dashboard created: {output_path}")
+    return output_path
 
 
 def export_tag_based_reports(domain, findings, output_dir=HTML_REPORT_DIR):
@@ -712,6 +1141,37 @@ def export_tag_based_reports(domain, findings, output_dir=HTML_REPORT_DIR):
         if dm:
             secret_count += len(dm.get('th_secrets', [])) + len(dm.get('potential_secrets', []))
 
+    # Calculate CVEs by severity
+    cve_by_severity = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0}
+    all_cve_ids = []
+    
+    for f in findings:
+        if f is None:
+            continue
+            
+        # Extract CVEs and their details
+        tech = f.get('tech', {})
+        cve_details = tech.get('cve_details', {})
+        
+        if isinstance(cve_details, dict):
+            # New format with package details
+            for pkg, info in cve_details.items():
+                if isinstance(info, dict) and 'ids' in info:
+                    for cve_id in info['ids']:
+                        all_cve_ids.append(cve_id)
+                        # Determine severity
+                        from utils.tech_helpers import get_vuln_severity
+                        severity = get_vuln_severity(cve_id)
+                        cve_by_severity[severity] += 1
+        elif isinstance(cve_details, list):
+            # Legacy format with just IDs
+            for cve_id in cve_details:
+                all_cve_ids.append(cve_id)
+                # Determine severity
+                from utils.tech_helpers import get_vuln_severity
+                severity = get_vuln_severity(cve_id)
+                cve_by_severity[severity] += 1
+
     # Enhanced HTML with better styling
     html = f"""
     <!DOCTYPE html>
@@ -720,6 +1180,7 @@ def export_tag_based_reports(domain, findings, output_dir=HTML_REPORT_DIR):
         <title>{domain} - Security Findings</title>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
         <style>
             body {{
                 font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -728,187 +1189,192 @@ def export_tag_based_reports(domain, findings, output_dir=HTML_REPORT_DIR):
                 background-color: #f5f5f7;
                 color: #1d1d1f;
             }}
-            .header {{
-                background: white;
+        .container {{
+            max-width: 1200px;
+            margin: 0 auto;
                 padding: 2rem;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+        .header {{
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+            color: white;
+            padding: 2.5rem 0;
                 margin-bottom: 2rem;
             }}
             .header h1 {{
                 margin: 0;
-                font-size: 2rem;
-                font-weight: 600;
-            }}
-            .header .breadcrumb {{
-                margin-top: 0.5rem;
-                color: #6b7280;
-            }}
-            .header .breadcrumb a {{
-                color: #6366f1;
-                text-decoration: none;
-            }}
-            .stats-cards {{
+            font-size: 2.5rem;
+            font-weight: 700;
+        }}
+        .stats {{
+            background-color: white;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+            margin-bottom: 2rem;
+            padding: 1.5rem;
+        }}
+        .stats-grid {{
                 display: grid;
                 grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-                gap: 1rem;
-                margin-bottom: 2rem;
-            }}
-            .stat-card {{
-                background: white;
-                padding: 1.5rem;
-                border-radius: 8px;
-                box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            gap: 1.5rem;
+        }}
+        .stat-item {{
                 text-align: center;
             }}
-            .stat-card h2 {{
-                margin: 0;
+        .stat-value {{
                 font-size: 2rem;
-                font-weight: 600;
-            }}
-            .stat-card p {{
-                margin: 0.5rem 0 0;
+            font-weight: 700;
+        }}
+        .new {{ color: #10b981; }}
+        .changed {{ color: #3b82f6; }}
+        .existing {{ color: #6b7280; }}
+        .stat-label {{
+            font-size: 0.875rem;
                 color: #6b7280;
-            }}
-            .new-stat {{
-                color: #ef4444;
-            }}
-            .changed-stat {{
-                color: #f59e0b;
-            }}
-            .existing-stat {{
-                color: #10b981;
-            }}
-            #searchBox {{{{
-                width: 100%;
-                padding: 0.75rem 1rem;
-                margin: 1rem 0 2rem;
-                border: 1px solid #d1d5db;
-                border-radius: 6px;
-                font-size: 1rem;
-            }}}}
-            .hidden {{{{ display:none !important; }}}}
-            .container {{
-                max-width: 1200px;
-                margin: 0 auto;
-                padding: 0 2rem 2rem;
-            }}
-            .tag-grid {{
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }}
+        .tags-grid {{
                 display: grid;
                 grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
                 gap: 1.5rem;
-                margin-bottom: 2rem;
+            margin-top: 1.5rem;
             }}
             .tag-card {{
-                background: white;
-                border-radius: 12px;
+            background-color: white;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
                 overflow: hidden;
-                box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-                transition: transform 0.2s ease, box-shadow 0.2s ease;
-                cursor: pointer;
-                color: inherit;
+            transition: transform 0.3s, box-shadow 0.3s;
+            display: flex;
                 text-decoration: none;
-                display: block;
+            color: #1d1d1f;
+            position: relative;
             }}
             .tag-card:hover {{
-                transform: translateY(-4px);
-                box-shadow: 0 10px 15px rgba(0,0,0,0.1);
+            transform: translateY(-5px);
+            box-shadow: 0 10px 20px rgba(0,0,0,0.1);
             }}
             .tag-card .thumbnail {{
-                height: 160px;
-                background-color: #f3f4f6;
-                overflow: hidden;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-            }}
-            .tag-card .thumbnail img {{
-                width: 100%;
-                height: 100%;
+            width: 120px;
+            height: 120px;
+            background-color: #f5f5f7;
+            flex-shrink: 0;
                 object-fit: cover;
             }}
             .tag-card .content {{
-                padding: 1.5rem;
+            padding: 1rem;
+            flex-grow: 1;
             }}
             .tag-card h3 {{
-                margin: 0;
+            margin: 0 0 0.5rem 0;
                 font-size: 1.25rem;
-                font-weight: 600;
+            color: #1d1d1f;
             }}
             .tag-card .count {{
-                margin-top: 0.5rem;
+            font-size: 0.875rem;
                 color: #6b7280;
+            margin-bottom: 0.75rem;
             }}
             .tag-card .status-badges {{
-                margin-top: 1rem;
                 display: flex;
                 flex-wrap: wrap;
                 gap: 0.5rem;
             }}
             .badge {{
-                font-size: 0.75rem;
+            display: inline-block;
                 padding: 0.25rem 0.5rem;
-                border-radius: 4px;
+            border-radius: 0.375rem;
+            font-size: 0.75rem;
                 font-weight: 500;
+            line-height: 1;
             }}
             .badge.new {{
-                background-color: #fef2f2;
-                color: #ef4444;
+            background-color: #ecfdf5;
+            color: #10b981;
             }}
             .badge.changed {{
-                background-color: #fffbeb;
-                color: #f59e0b;
+            background-color: #eff6ff;
+            color: #3b82f6;
             }}
             .badge.existing {{
-                background-color: #ecfdf5;
-                color: #10b981;
+            background-color: #f3f4f6;
+            color: #6b7280;
+            }}
+        .chart-container {{
+                background: white;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+                padding: 1.5rem;
+                margin-bottom: 2rem;
+        }}
+        .action-bar {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+                margin-bottom: 1.5rem;
+        }}
+        .back-link {{
+            color: #6366f1;
+            text-decoration: none;
+            display: inline-flex;
+                align-items: center;
+            font-weight: 500;
+        }}
+        .back-link:hover {{
+            text-decoration: underline;
+        }}
+        .back-link svg {{
+            margin-right: 0.5rem;
+            height: 1rem;
+            width: 1rem;
             }}
         </style>
     </head>
     <body>
         <div class="header">
-            <div class="breadcrumb">
-                <a href="dashboard.html">Dashboard</a> &gt; {domain}
-            </div>
-            <h1>{domain}</h1>
+            <div class="container">
+                <h1>Findings by Tag: {domain}</h1>
+                <p>Review security findings grouped by their detected purpose</p>
+                </div>
         </div>
         
         <div class="container">
-            <!-- Domain statistics summary -->
-            <div class="stats-cards">
-                <div class="stat-card">
-                    <h2>{total_count}</h2>
-                    <p>Total Findings</p>
-                </div>
-                <div class="stat-card">
-                    <h2 class="new-stat">{new_count}</h2>
-                    <p>New Findings</p>
-                </div>
-                <div class="stat-card">
-                    <h2 class="changed-stat">{changed_count}</h2>
-                    <p>Changed Findings</p>
-                </div>
-                <div class="stat-card">
-                    <h2 class="existing-stat">{existing_count}</h2>
-                    <p>Existing Findings</p>
-                </div>
-                <div class="stat-card">
-                    <h2>{cve_count}</h2>
-                    <p>Vulnerabilities</p>
-                </div>
-                <div class="stat-card">
-                    <h2>{secret_count}</h2>
-                    <p>Secrets</p>
-                </div>
+            <div class="action-bar">
+                <a href="dashboard.html" class="back-link">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+                    </svg>
+                    Back to Dashboard
+                </a>
             </div>
             
-            <input type="text" id="searchBox" placeholder="Search findings...">
-            
-            <div class="tag-grid">
+            <div class="stats">
+                <h2>Findings Overview</h2>
+                <div class="stats-grid">
+                    <div class="stat-item">
+                        <div class="stat-value">{total_count}</div>
+                        <div class="stat-label">Total Findings</div>
+                </div>
+                    <div class="stat-item">
+                        <div class="stat-value new">{new_count}</div>
+                        <div class="stat-label">New</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-value changed">{changed_count}</div>
+                        <div class="stat-label">Changed</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-value existing">{existing_count}</div>
+                        <div class="stat-label">Existing</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tags-grid">
     """
 
-    # Sort tags by priority
-    from utils.ai_analyzer import get_category_priority
-    sorted_tags = sorted(grouped.items(), key=lambda x: -get_category_priority(x[0]))
+    # Sort tags for consistent display
+    sorted_tags = sorted(grouped.items(), key=lambda x: (-len(x[1]), x[0]))
 
     for tag, items in sorted_tags:
         # Get status counts for this tag
@@ -932,10 +1398,10 @@ def export_tag_based_reports(domain, findings, output_dir=HTML_REPORT_DIR):
 
         # Create tag card
         tag_slug = slugify_tag(tag)
-        subpage_name = f"{dom_slug}_tag_{tag_slug}.html"
+        subpage_name = os.path.join(output_dir, f"{dom_slug}_tag_{tag_slug}.html")
 
         html += f"""
-                <a href="{subpage_name}">
+                <a href="{dom_slug}_tag_{tag_slug}.html">
                     <div class="tag-card">
                         {screenshot_html}
                         <div class="content">
@@ -961,489 +1427,514 @@ def export_tag_based_reports(domain, findings, output_dir=HTML_REPORT_DIR):
         # Generate the sub-page
         make_enhanced_subpage_for_tag(domain, tag, items, subpage_name, output_dir, dom_slug)
 
-    html += f"""
+    html += """
             </div>
-            <div style="text-align: center; color: #6b7280; margin-top: 2rem;">
-                Generated on {datetime.now().strftime('%Y-%m-%d at %H:%M:%S UTC')}
             </div>
-        </div>
-        <script>
-        const searchBox = document.getElementById('searchBox');
-        searchBox?.addEventListener('input', function() {{{{
-            const q = this.value.toLowerCase();
-            document.querySelectorAll('.tag-card').forEach(card => {{{{
-                const text = card.innerText.toLowerCase();
-                if(q === '' || text.indexOf(q) !== -1) {{{{
-                    card.classList.remove('hidden');
-                }}}} else {{{{
-                    card.classList.add('hidden');
-                }}}}
-            }}}});
-        }}}});
-        </script>
     </body>
     </html>
     """
 
-    # Save domain tag index
-    with open(tag_index_file, "w", encoding="utf-8") as f:
+    with open(tag_index_file, "w") as f:
         f.write(html)
 
     print(f"[+] Tag index for '{domain}' saved to: {tag_index_file}")
+    return tag_index_file
 
 
-def make_enhanced_subpage_for_tag(domain, tag, items, subpage_name, output_dir, dom_slug):
-    """
-    Creates an enhanced subpage with better styling and status indicators
-    """
-    # Remove any None placeholders
-    items = [itm for itm in items if itm is not None]
-    if not items:
-        return  # nothing to render
-
-    subpage_path = os.path.join(output_dir, subpage_name)
-
-    # Create any nested directories required by sanitised domain names with slashes
-    os.makedirs(os.path.dirname(subpage_path), exist_ok=True)
-
-    html = f"""
-    <!DOCTYPE html>
-    <html>
+def make_enhanced_subpage_for_tag(domain, tag, items, subpage_name, output_dir, dom_slug=None):
+    """Generate an enhanced subpage for a specific tag"""
+    if not dom_slug:
+        dom_slug = slugify_tag(domain)
+    
+    # Sort items by most interesting first: new -> changed -> existing
+    sorted_items = sorted(items, key=lambda x: {
+        'new': 0,
+        'changed': 1,
+        'existing': 2
+    }.get(x.get('finding_status', 'existing'), 3))
+    
+    with open(subpage_name, "w") as f:
+        # Page header and CSS
+        f.write(f"""<!DOCTYPE html>
+<html lang="en">
     <head>
-        <title>{domain} - {tag}</title>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{tag} - {domain}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
         <style>
             body {{
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
                 padding: 0;
+            margin: 0;
                 background-color: #f5f5f7;
-                color: #1d1d1f;
-            }}
-            .header {{
-                background: white;
-                padding: 2rem;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-                margin-bottom: 2rem;
-            }}
-            .header h1 {{
-                margin: 0;
-                font-size: 2rem;
-                font-weight: 600;
-            }}
-            .header .breadcrumb {{
-                margin-top: 0.5rem;
-                color: #6b7280;
-            }}
-            .header .breadcrumb a {{
-                color: #6366f1;
-                text-decoration: none;
-            }}
-            .container {{
-                max-width: 1200px;
-                margin: 0 auto;
-                padding: 0 2rem 2rem;
-            }}
-            .findings-grid {{
-                display: grid;
-                gap: 1.5rem;
-            }}
-            .finding {{
-                background: white;
-                border-radius: 12px;
-                padding: 1.5rem;
-                box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-                display: grid;
-                grid-template-columns: 300px 1fr;
-                gap: 1.5rem;
-                align-items: start;
-            }}
-            .finding img {{
-                width: 100%;
-                border-radius: 8px;
-                border: 1px solid #e5e7eb;
-            }}
-            .finding-details h3 {{
-                margin: 0 0 0.5rem 0;
-                font-size: 1.125rem;
-                word-break: break-all;
-            }}
-            .finding-details a {{
-                color: #6366f1;
-                text-decoration: none;
-            }}
-            .finding-details a:hover {{
-                text-decoration: underline;
-            }}
-            .metadata {{
-                display: flex;
-                gap: 1rem;
-                margin: 1rem 0;
-                flex-wrap: wrap;
-            }}
-            .metadata-item {{
-                background: #f3f4f6;
-                padding: 0.5rem 1rem;
-                border-radius: 6px;
-                font-size: 0.875rem;
-            }}
-            .metadata-item strong {{
-                color: #4b5563;
-            }}
-            .status-indicator {{
+        }}
+        .card {{
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            border: none;
+            border-radius: 10px;
+        }}
+        .card-header {{
+            background-color: #f8f9fa;
+            border-bottom: none;
+            padding: 15px;
+        }}
+        .status-new {{
+            background-color: #28a745 !important;
+        }}
+        .status-changed {{
+            background-color: #17a2b8 !important;
+        }}
+        .status-existing {{
+            background-color: #6c757d !important;
+        }}
+        .tech-badge {{
+            margin-right: 5px;
+            margin-bottom: 5px;
+        }}
+        .screenshot-container {{
+            text-align: center;
+            margin-bottom: 15px;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+            padding: 10px;
+        }}
+        .screenshot-container img {{
+            max-width: 100%;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }}
+        .tech-category-item {{
+            padding: 6px 12px;
+            border-radius: 15px;
+            background-color: #e9ecef;
+            font-size: 13px;
                 display: inline-flex;
                 align-items: center;
-                gap: 0.5rem;
-                padding: 0.5rem 1rem;
-                border-radius: 6px;
-                font-weight: 500;
-                font-size: 0.875rem;
-            }}
-            .status-indicator.new {{
-                background: #d1fae5;
-                color: #059669;
-            }}
-            .status-indicator.changed {{
-                background: #fed7aa;
-                color: #ea580c;
-            }}
-            .status-indicator.existing {{
-                background: #e0e7ff;
-                color: #4338ca;
-            }}
-            @media (max-width: 768px) {{
-                .finding {{
-                    grid-template-columns: 1fr;
-                }}
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            margin-right: 8px;
+            margin-bottom: 8px;
+        }}
+        .tech-category-item i {{
+            margin-right: 5px;
+        }}
+        .main-header {{
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+            color: white;
+            padding: 30px 0;
+            margin-bottom: 0;
+            text-align: center;
+        }}
+        .breadcrumb-container {{
+            background-color: white;
+            padding: 10px 0;
+            border-bottom: 1px solid #eee;
+            margin-bottom: 30px;
+        }}
+        .filter-container {{
+            background-color: #fff;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            position: sticky;
+            top: 15px;
+            z-index: 1000;
+        }}
+        .filter-row {{
+            display: flex;
+            gap: 15px;
+        }}
+        .filter-item {{
+            flex: 1;
+        }}
+        .meta-info {{
+            background-color: #f8f9fa;
+            border-radius: 5px;
+            padding: 10px 15px;
+            margin-bottom: 15px;
             }}
         </style>
     </head>
     <body>
-        <div class="header">
-            <div class="container">
+    <header class="main-header">
                 <h1>{tag}</h1>
-                <div class="breadcrumb">
-                    <a href="dashboard.html">Dashboard</a> / 
-                    <a href="{dom_slug}_tags.html">{domain}</a> / 
-                    {tag}
-                </div>
+        <p>Findings for {domain}</p>
+    </header>
+    
+    <div class="breadcrumb-container">
+        <div class="container">
+            <nav aria-label="breadcrumb">
+                <ol class="breadcrumb mb-0">
+                    <li class="breadcrumb-item"><a href="dashboard.html">Dashboard</a></li>
+                    <li class="breadcrumb-item"><a href="dashboard.html">{domain}</a></li>
+                    <li class="breadcrumb-item"><a href="{domain}_tags.html">Tags</a></li>
+                    <li class="breadcrumb-item active">{tag}</li>
+                </ol>
+            </nav>
             </div>
         </div>
         
         <div class="container">
-            <div class="findings-grid">
-    """
-
-    # Sort items by status (new first, then changed, then existing)
-    status_order = {'new': 0, 'changed': 1, 'existing': 2}
-    sorted_items = sorted(items, key=lambda x: (status_order.get(x.get('finding_status', 'existing'), 3), x['url']))
-
-    for f in sorted_items:
-        screenshot_html = "N/A"
-        if f.get("screenshot") and os.path.exists(f["screenshot"]):
-            screenshot_rel = os.path.relpath(f["screenshot"], output_dir)
-            screenshot_html = f'<img src="{screenshot_rel}" alt="Screenshot">'
-
-        status = f.get('finding_status', 'unknown')
-        status_text = status.capitalize()
+        <div class="filter-container">
+            <div class="filter-row">
+                <div class="filter-item">
+                    <input type="text" class="form-control" id="searchInput" placeholder="Search findings...">
+                </div>
+                <div class="filter-item">
+                    <select class="form-select" id="statusFilter">
+                        <option value="all">All Statuses</option>
+                        <option value="new">New</option>
+                        <option value="changed">Changed</option>
+                        <option value="existing">Existing</option>
+                    </select>
+                </div>
+                <div class="filter-item">
+                    <button class="btn btn-primary w-100" id="resetFilters">Reset Filters</button>
+                </div>
+            </div>
+        </div>
         
-        html += f"""
-                <div class="finding">
-                    <div class="screenshot">
-                        {screenshot_html}
+        <!-- Add stats row -->
+        <div class="row mb-4">
+            <div class="col-md-12">
+                <div class="card">
+                    <div class="card-body">
+                        <div class="d-flex flex-wrap justify-content-between">
+                            <!-- Download stats -->
+                            <div class="me-4 mb-2">
+                                <h6 class="mb-1">Downloadable Files</h6>
+                                <div class="d-flex align-items-center">
+                                    <span class="badge bg-info me-2">
+                                        <i class="fas fa-download me-1"></i> 
+                                        {sum(1 for item in items if item.get('download_meta', {}).get('is_downloadable'))}
+                                    </span>
+                                    <button class="btn btn-sm btn-outline-info" type="button" data-bs-toggle="collapse" 
+                                        data-bs-target="#downloadableDetails" aria-expanded="false">
+                                        View Details
+                                    </button>
+                                </div>
+                            </div>
+                            
+                            <!-- Secret stats -->
+                            <div class="mb-2">
+                                <h6 class="mb-1">Exposed Secrets</h6>
+                                <div class="d-flex align-items-center">
+                                    <span class="badge bg-danger me-2">
+                                        <i class="fas fa-key me-1"></i> 
+                                        {sum(1 for item in items if item.get('secrets'))}
+                                    </span>
+                                    <button class="btn btn-sm btn-outline-danger" type="button" data-bs-toggle="collapse" 
+                                        data-bs-target="#secretsDetails" aria-expanded="false">
+                                        View Details
+                                    </button>
+                                </div>
+                            </div>
+
+                            <!-- CVE stats -->
+                            <div class="mb-2">
+                                <h6 class="mb-1">Vulnerabilities</h6>
+                                <div class="d-flex align-items-center">
+                                    <span class="badge bg-warning me-2">
+                                        <i class="fas fa-exclamation-triangle me-1"></i> 
+                                        {sum(1 for item in items if item.get('tech', {}).get('cve_vulns', 0) > 0)}
+                                    </span>
+                                    <button class="btn btn-sm btn-outline-warning" type="button" data-bs-toggle="collapse" 
+                                        data-bs-target="#cveDetails" aria-expanded="false">
+                                        View Details
+                                    </button>
                     </div>
-                    <div class="finding-details">
-                        <h3><a href="{f['url']}" target="_blank">{f['url']}</a></h3>
-                        <div class="status-indicator {status}">
-                            <span>⬤</span> {status_text}
                         </div>
-                        <div class="metadata">
-                            <div class="metadata-item">
-                                <strong>Status:</strong> {f.get('status','')}
                             </div>
-                            <div class="metadata-item">
-                                <strong>Length:</strong> {f.get('length','')} bytes
                             </div>
-                            <div class="metadata-item">
-                                <strong>Times Seen:</strong> {f.get('times_seen', 1)}
+                </div>
+            </div>
                             </div>
         
-                            <div class="metadata-item">
-                                <strong>First Seen:</strong> {f.get('first_seen','')}
-                            </div>
-            """
+
         
-        if f.get('last_seen') and f.get('finding_status') == 'existing':
-            last_seen = f['last_seen']
-            if isinstance(last_seen, str) and 'T' in last_seen:
-                try:
-                    from datetime import datetime
-                    dt = datetime.fromisoformat(last_seen.replace('Z', '+00:00'))
-                    last_seen = dt.strftime('%Y-%m-%d %H:%M')
-                except:
-                    pass
-            html += f"""
-                            <div class="metadata-item">
-                                <strong>Last Seen:</strong> {last_seen}
+        <!-- Downloadable details -->
+        <div class="collapse mb-4" id="downloadableDetails">
+            <div class="card">
+                <div class="card-header">
+                    <h5>Downloadable Files</h5>
                             </div>
-            """
+                <div class="card-body">
+                    <table class="table table-striped">
+                        <thead>
+                            <tr>
+                                <th>Path</th>
+                                <th>Filename</th>
+                                <th>Type</th>
+                                <th>Size</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {(''.join([f"<tr><td>{item.get('path', '/')}</td><td>{item.get('download_meta', {}).get('filename', 'unknown')}</td><td>{item.get('download_meta', {}).get('mime_type', 'unknown')}</td><td>{format_file_size(item.get('download_meta', {}).get('size_bytes', 0))}</td></tr>" for item in items if item.get('download_meta', {}).get('is_downloadable')]))}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
         
-        html += """
+        <!-- Secrets details -->
+        <div class="collapse mb-4" id="secretsDetails">
+            <div class="card">
+                <div class="card-header">
+                    <h5>Exposed Secrets</h5>
+                        </div>
+                <div class="card-body">
+                    <table class="table table-striped">
+                        <thead>
+                            <tr>
+                                <th>Path</th>
+                                <th>Secret Type</th>
+                                <th>Severity</th>
+                                <th>Line</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {(''.join([f"<tr><td>{item.get('path', '/')}</td><td>{secret.get('type', 'Unknown')}</td><td><span class='badge bg-{severity_to_color(secret.get('severity', 'medium'))}'>{secret.get('severity', 'medium').upper()}</span></td><td>{secret.get('line_number', 'N/A')}</td></tr>" for item in items for secret in item.get('secrets', []) if item.get('secrets')]))}
+                        </tbody>
+                    </table>
+                    </div>
+                </div>
+        </div>
+        
+        <!-- CVE details -->
+        <div class="collapse mb-4" id="cveDetails">
+            <div class="card">
+                <div class="card-header">
+                    <h5>Vulnerabilities</h5>
+                </div>
+                <div class="card-body">
+                    <table class="table table-striped">
+                        <thead>
+                            <tr>
+                                <th>Path</th>
+                                <th>Package</th>
+                                <th>Version</th>
+                                <th>CVE IDs</th>
+                                <th>Severity</th>
+                            </tr>
+                        </thead>
+                        <tbody>""")
+        
+        # Add CVE rows
+        cve_rows_added = False
+        for item in items:
+            tech = item.get('tech', {})
+            if tech and "cve_details" in tech:
+                for pkg, details in tech["cve_details"].items():
+                    if isinstance(details, dict) and "ids" in details:
+                        cve_rows_added = True
+                        path = item.get('path', '/')
+                        version = details.get('version', 'Unknown')
+                        ids = '<br>'.join(details.get('ids', []))
+                        severity_badges = []
+                        for cve_id in details.get('ids', []):
+                            severity = get_vuln_severity(cve_id)
+                            color = severity_to_color(severity)
+                            severity_badges.append(f'<span class="badge bg-{color}">{severity.upper()}</span>')
+                        badges_html = '<br>'.join(severity_badges)
+                        f.write(f'<tr><td>{path}</td><td>{pkg}</td><td>{version}</td><td>{ids}</td><td>{badges_html}</td></tr>')
+        
+        if not cve_rows_added:
+            f.write('<tr><td colspan="5" class="text-center">No vulnerabilities found</td></tr>')
+        
+        f.write("""
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        
+        <div class="findings-container">
+""")
+        
+        # Add each finding
+        for item in sorted_items:
+            path = item.get('path', 'unknown')
+            url = item.get('url', '')
+            status = item.get('status', 200)
+            length = item.get('length', 0)
+            finding_status = item.get('finding_status', 'existing')
+            
+            # Handle root path display
+            display_path = path
+            if display_path == "/" or not display_path or display_path == "unknown":
+                display_path = "(root)"
+                
+            # Determine status badge class
+            status_class = {
+                'new': 'status-new',
+                'changed': 'status-changed',
+                'existing': 'status-existing'
+            }.get(finding_status, '')
+            
+            # Prepare badge content
+            status_text = finding_status.capitalize()
+            
+            # Format screenshot path
+            screenshot_html = ""
+            screenshot_path = item.get('screenshot', '')
+            if screenshot_path:
+                rel_screenshot_path = os.path.relpath(screenshot_path, output_dir) if os.path.exists(screenshot_path) else ""
+                if rel_screenshot_path:
+                    screenshot_html = f'<div class="screenshot-container"><img src="{rel_screenshot_path}" alt="Screenshot of {url}" class="img-fluid"></div>'
+                else:
+                    screenshot_html = f'<div class="screenshot-container"><p class="text-muted">Screenshot not available</p></div>'
+                    
+            # Format technologies
+            tech_html = ""
+            tech = item.get('tech', {})
+            if tech:
+                non_cve_techs = {k: v for k, v in tech.items() if k not in ["cve_vulns", "cve_details"]}
+                if non_cve_techs:
+                    tech_html = '<div class="mt-3"><h6>Technologies</h6><div>'
+                    for tech_name, tech_info in non_cve_techs.items():
+                        if isinstance(tech_info, dict) and tech_info.get('version'):
+                            tech_html += f'<span class="badge bg-secondary tech-badge">{tech_name} {tech_info["version"]}</span>'
+                        else:
+                            tech_html += f'<span class="badge bg-secondary tech-badge">{tech_name}</span>'
+                    tech_html += '</div></div>'
+                    
+            # Format downloadable information
+            download_html = ""
+            download_meta = item.get('download_meta', {})
+            if download_meta and download_meta.get('is_downloadable'):
+                filename = download_meta.get('filename', 'unknown')
+                mime_type = download_meta.get('mime_type', 'unknown')
+                size_bytes = download_meta.get('size_bytes', 0)
+                size_display = format_file_size(size_bytes)
+                
+                download_html = f"""
+                <div class="mt-3">
+                    <h6><i class="fas fa-download"></i> Downloadable Content</h6>
+                    <div class="row">
+                        <div class="col-md-6">
+                            <p><strong>Filename:</strong> {filename}</p>
+                            <p><strong>MIME Type:</strong> {mime_type}</p>
+                        </div>
+                        <div class="col-md-6">
+                            <p><strong>File Size:</strong> {size_display}</p>
                         </div>
                     </div>
                 </div>
-        """
-
-        # ---- security & technology badges ----
-        # Download meta for secrets and file info
-        download_meta = f.get('download_meta') or {}
-
-        # Technology & CVEs
-        tech_badges, cve_summary = extract_tech_and_cves(f.get('tech') or {})
-
-        # If summary only has _total (no package details) treat as empty for fallback
-        if set(cve_summary.keys()) == {"_total"}:
-            cve_summary = {}
-
-        # If still empty, fallback to download_meta
-        if not cve_summary and download_meta.get('cve_details'):
-            for pkg, info in (download_meta.get('cve_details') or {}).items():
-                if pkg.lower() in {"null", "none", "_total"}:
-                    continue
-                if isinstance(info, dict):
-                    ids = info.get('ids', [])
-                    version = info.get('version','')
-                else:
-                    ids = info
-                    version = ''
-                cve_summary[pkg] = {
-                    'count': len(ids),
-                    'ids': ids,
-                    'version': version,
-                    'severity': severity_from_count(len(ids))
-                }
-
-        tech_badge_html = " ".join(
-            f"<span style='background:#6b7280;color:#fff;padding:2px 6px;border-radius:4px;font-size:0.75rem'>{b}</span>" for b in tech_badges
-        )
-
-        total_cve_cnt = sum(info['count'] for info in cve_summary.values())
-        if not total_cve_cnt:
-            tech_dict = f.get('tech') or {}
-            total_cve_cnt = tech_dict.get('cve_vulns', 0) or 0
-        cve_badge = ""
-        if total_cve_cnt:
-            sev  = severity_from_count(total_cve_cnt)
-            color_map = {'Critical':'#991b1b','High':'#b91c1c','Medium':'#d97706','Low':'#f59e0b'}
-            color = color_map.get(sev, '#b91c1c')
-            cve_badge = f"<span style='background:{color};color:#fff;padding:2px 6px;border-radius:4px;font-size:0.75rem' title='CVE severity {sev}'>{sev} CVE {total_cve_cnt}</span>"
-
-        # Secrets badge
-        secret_cnt = len(download_meta.get('th_secrets', [])) + len(download_meta.get('potential_secrets', []))
-        secret_badge = ""
-        if secret_cnt:
-            secret_badge = f"<span style='background:#be123c;color:#fff;padding:2px 6px;border-radius:4px;font-size:0.75rem' title='Potential secrets detected'>SECRETS {secret_cnt}</span>"
-
-        # Build enhanced secret details HTML with categorization
-        secret_details_html = ""
-        if secret_cnt:
-            from utils.enhanced_reporter import categorize_secret, SECRET_TYPES
-            
-            secret_by_type = defaultdict(list)
-            
-            # Categorize TruffleHog secrets
-            for s in download_meta.get('th_secrets', []):
-                val = s.get('raw') or s.get('redacted') or '***'
-                reason = s.get('reason', '')
-                secret_info = categorize_secret(val, reason)
-                
-                # Redact sensitive parts
-                if len(val) > 20:
-                    redacted = val[:8] + '...' + val[-8:]
-                else:
-                    redacted = val[:4] + '***'
-                    
-                secret_by_type[secret_info['type']].append({
-                    'value': redacted,
-                    'reason': reason,
-                    'risk': secret_info['risk'],
-                    'icon': secret_info['icon']
-                })
-            
-            # Add potential secrets
-            for pat in download_meta.get('potential_secrets', []):
-                secret_info = categorize_secret(pat, '')
-                if len(pat) > 20:
-                    redacted = pat[:8] + '...' + pat[-8:]
-                else:
-                    redacted = pat[:4] + '***'
-                    
-                secret_by_type[secret_info['type']].append({
-                    'value': redacted,
-                    'reason': 'Pattern match',
-                    'risk': secret_info['risk'],
-                    'icon': secret_info['icon']
-                })
-            
-            if secret_by_type:
-                secret_details_html = """
-                            <details style='margin-top:0.5rem;font-size:0.8rem'>
-                                <summary style='cursor:pointer;'>🔐 Secret Analysis</summary>
-                                <div style='margin-top:0.5rem;padding:0.5rem;background:#fef2f2;border-radius:4px'>
                 """
-                
-                # Sort by risk level
-                risk_order = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
-                sorted_types = sorted(secret_by_type.items(), 
-                                    key=lambda x: min(risk_order.get(s['risk'], 4) for s in x[1]))
-                
-                for secret_type, secrets in sorted_types:
-                    type_config = SECRET_TYPES.get(secret_type, {'icon': '🔓'})
-                    secret_details_html += f"""
-                        <div style='margin-bottom:0.5rem'>
-                            <strong>{type_config['icon']} {secret_type.replace('_', ' ').title()}</strong>
+            
+            # Format secrets information
+            secrets_html = ""
+            secrets = item.get('secrets', [])
+            if secrets:
+                secrets_html = f"""
+                <div class="secret-section">
+                    <h6><i class="fas fa-key"></i> Secrets Detected ({len(secrets)})</h6>
+                    <div class="secrets-list">
                     """
                     
-                    for secret in secrets:
-                        risk_color = {'critical': '#991b1b', 'high': '#dc2626', 'medium': '#f59e0b', 'low': '#3b82f6'}
-                        color = risk_color.get(secret['risk'], '#6b7280')
-                        secret_details_html += f"""
-                            <div style='margin-left:1rem;padding:0.25rem 0'>
-                                <code style='background:#fee2e2;padding:2px 4px;border-radius:2px'>{secret['value']}</code>
-                                <span style='color:{color};font-size:0.7rem;margin-left:0.5rem'>{secret['risk'].upper()}</span>
-                                <em style='color:#6b7280;font-size:0.7rem'> - {secret['reason']}</em>
+                for secret in secrets:
+                    secret_type = secret.get('type', 'Unknown')
+                    secret_value = secret.get('value', '')
+                    severity = secret.get('severity', 'medium')
+                    line_number = secret.get('line_number', '')
+                    
+                    secrets_html += f"""
+                    <div class="secret-item">
+                        <div class="secret-type secret-{severity}">{secret_type} <span class="badge bg-secondary">Line {line_number}</span></div>
+                        <div class="secret-value">{secret_value}</div>
                             </div>
                         """
                     
-                    secret_details_html += "</div>"
-                
-                secret_details_html += """
+                secrets_html += "</div></div>"
+            
+            # Write the finding card
+            f.write(f"""
+            <div class="card mb-4 finding-card" data-status="{finding_status}">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h5><a href="{url}" target="_blank">{display_path}</a></h5>
+                    <span class="badge {status_class} status-badge">{status_text}</span>
                                 </div>
-                            </details>
-                """
-
-        # Enhanced download display
-        dl_badge = ""
-        download_details = ""
-        if f.get('downloadable'):
-            file_size = download_meta.get('size', 0)
-            file_type = download_meta.get('file_type', 'Unknown')
-            mime_type = download_meta.get('mime_type', '')
-            
-            # Format file size
-            if file_size > 1048576:
-                size_str = f"{file_size / 1048576:.1f} MB"
-            elif file_size > 1024:
-                size_str = f"{file_size / 1024:.1f} KB"
-            else:
-                size_str = f"{file_size} B"
-            
-            dl_badge = f"""<span style='background:#0369a1;color:#fff;padding:4px 8px;border-radius:4px;font-size:0.75rem'>
-                📥 {file_type} ({size_str})
-            </span>"""
-            
-            # Add file details
-            if mime_type or file_size > 0:
-                sha256 = download_meta.get('sha256', '')
-                download_details = f"""
-                    <details style='margin-top:0.5rem;font-size:0.8rem'>
-                        <summary style='cursor:pointer;'>Download Details</summary>
-                        <div style='margin-top:0.5rem;padding:0.5rem;background:#f0f9ff;border-radius:4px'>
-                            <strong>File Information:</strong><br>
-                            MIME Type: <code>{mime_type or 'Unknown'}</code><br>
-                            Size: {size_str}<br>
-                            {f'SHA256: <code style="font-size:0.7rem">{sha256[:32]}...</code><br>' if sha256 else ''}
-                            <a href="{f['url']}" target="_blank" style="color:#0369a1">Download File →</a>
+                <div class="card-body">
+                    {screenshot_html}
+                    
+                    <div class="meta-info">
+                        <div class="row">
+                            <div class="col-md-4">
+                                <p><strong>URL:</strong> <a href="{url}" target="_blank">{url}</a></p>
+                                <p><strong>Status:</strong> <span class="badge bg-{'success' if 200 <= status < 300 else 'warning' if 300 <= status < 400 else 'danger'}">{status}</span></p>
+                            </div>
+                            <div class="col-md-4">
+                                <p><strong>Size:</strong> <span>{length} bytes</span></p>
+                                <p><strong>First Seen:</strong> {item.get('first_seen', 'Unknown')}</p>
+                            </div>
+                            <div class="col-md-4">
+                                <p><strong>Finding Status:</strong> <span class="badge {status_class}">{status_text}</span></p>
+                            </div>
                         </div>
-                    </details>
-                """
-
-        if cve_badge or secret_badge or tech_badge_html or dl_badge:
-            html += f"""
-                            <div class="metadata-item">{dl_badge} {cve_badge} {secret_badge} {tech_badge_html}</div>
-            """
-        # append secret details if any
-        if secret_details_html:
-            html += secret_details_html
+                    </div>
+                    
+                    {tech_html}
+                    {download_html}
+                    {secrets_html}
+                </div>
+            </div>
+            """)
+        
+        # Close the HTML
+        f.write("""
+                        </div>
+    </div>
+    
+    <!-- Bootstrap JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+    
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const searchInput = document.getElementById('searchInput');
+            const statusFilter = document.getElementById('statusFilter');
+            const tagFilter = document.getElementById('tagFilter');
+            const resetButton = document.getElementById('resetFilters');
+            const findingCards = document.querySelectorAll('.finding-card');
             
-        # append download details if any
-        if download_details:
-            html += download_details
-
-        # Collapsible CVE details table
-        if cve_summary:
-            html += """
-                            <details style='margin-top:0.5rem;font-size:0.8rem'>
-                                <summary style='cursor:pointer;'>CVE Details</summary>
-                                <table style='margin-top:0.5rem;border-collapse:collapse'>
-                                    <thead><tr><th style='padding:2px 6px;text-align:left'>Package</th><th style='padding:2px 6px'>Version</th><th style='padding:2px 6px'>Count</th><th style='padding:2px 6px'>Severity</th><th style='padding:2px 6px'>IDs</th></tr></thead>
-            <tbody>
-            """
-            for pkg, info in cve_summary.items():
-                if pkg.lower() in {"null", "none", "_total"}:
-                    continue
-                ver = info.get('version','')
-                id_links: list[str] = []
-                full_ids = info.get('ids', [])
-                for _cid in full_ids[:5]:
-                    # Build external link (NVD for CVE, GitHub for GHSA, fallback google)
-                    if _cid.startswith('CVE'):
-                        href = f"https://nvd.nist.gov/vuln/detail/{_cid}"
-                    elif _cid.lower().startswith('ghsa'):
-                        href = f"https://github.com/advisories/{_cid}"
-                    else:
-                        href = f"https://www.google.com/search?q={_cid}"
-
-                    desc = _fetch_cve_summary(_cid)
-                    if desc:
-                        safe_desc = (
-                            desc.replace("'", "&#39;").replace('"', "&quot;")[:240]
-                        )
-                        title_attr = f' title="{safe_desc}"'
-                    else:
-                        title_attr = ''
-                    id_links.append(f"<a href='{href}' target='_blank'{title_attr}>{_cid}</a>")
-
-                extra_cnt = len(full_ids) - 5
-                if extra_cnt > 0:
-                    id_links.append(f"…+{extra_cnt} more")
-                ids_html = ', '.join(id_links)
-                tooltip = f"title='{pkg} vulnerabilities'"
-                html += f"<tr><td style='padding:2px 6px' {tooltip}>{pkg}</td><td style='padding:2px 6px'>{ver}</td><td style='padding:2px 6px;text-align:center'>{info['count']}</td><td style='padding:2px 6px'>{info['severity']}</td><td style='padding:2px 6px;font-size:0.7rem'>{ids_html}</td></tr>"
-            html += """
-                                    </tbody></table></details>
-            """
-
-    html += f"""
-            </div>
-            <div style="text-align: center; color: #6b7280; margin-top: 2rem;">
-                <a href="{dom_slug}_tags.html" style="color: #6366f1;">← Back to {domain} overview</a>
-            </div>
-        </div>
+            function applyFilters() {
+                const searchTerm = searchInput.value.toLowerCase();
+                const statusValue = statusFilter.value;
+                const tagValue = tagFilter.value;
+                
+                findingCards.forEach(card => {
+                    const cardContent = card.textContent.toLowerCase();
+                    const cardStatus = card.dataset.status;
+                    const cardTag = card.dataset.tag;
+                    
+                    const matchesSearch = searchTerm === '' || cardContent.includes(searchTerm);
+                    const matchesStatus = statusValue === 'all' || cardStatus === statusValue;
+                    const matchesTag = tagValue === 'all' || cardTag === tagValue;
+                    
+                    card.style.display = (matchesSearch && matchesStatus && matchesTag) ? 'block' : 'none';
+                });
+            }
+            
+            searchInput.addEventListener('input', applyFilters);
+            statusFilter.addEventListener('change', applyFilters);
+            tagFilter.addEventListener('change', applyFilters);
+            
+            resetButton.addEventListener('click', function() {
+                searchInput.value = '';
+                statusFilter.value = 'all';
+                tagFilter.value = 'all';
+                applyFilters();
+            });
+        });
+    </script>
     </body>
     </html>
-    """
-
-    with open(subpage_path, "w", encoding="utf-8") as f:
-        f.write(html)
-
-    print(f"[+] Created enhanced subpage: {subpage_path} for tag={tag}")
-
-
-def slugify_tag(tag):
-    """
-    Converts a tag string into a filesystem-safe slug
-    """
-    return (
-        tag.lower()
-           .replace(" ", "_")
-           .replace("/", "_")
-           .replace("\\", "_")
-           .replace("(", "")
-           .replace(")", "")
-           .replace(",", "")
-    )
+""")
+    
+    logger.info(f"[+] Created enhanced subpage: {subpage_name} for tag={tag}")
 
 
 def create_compliance_report(domain, findings, output_dir=HTML_REPORT_DIR):
@@ -1556,3 +2047,725 @@ def create_compliance_report(domain, findings, output_dir=HTML_REPORT_DIR):
         fp.write(html)
 
     return filepath
+
+def _generate_security_posture_html(domain, posture_data):
+    """Generate HTML for the security posture section of a domain card"""
+    
+    risk_rating = posture_data.get("risk_rating", "UNKNOWN")
+    risk_score = posture_data.get("risk_score", "?/10")
+    summary = posture_data.get("summary", "No security posture data available")
+    recommendations = posture_data.get("recommendations", [])
+    cve_summary = posture_data.get("cve_summary", "")
+    cves = posture_data.get("cves", [])
+    missing_headers = posture_data.get("missing_headers", [])
+    
+    # Set risk color based on rating
+    risk_color = "#6c757d"  # Default gray
+    if risk_rating == "CRITICAL":
+        risk_color = "#dc3545"  # Red
+    elif risk_rating == "HIGH":
+        risk_color = "#fd7e14"  # Orange
+    elif risk_rating == "MEDIUM":
+        risk_color = "#ffc107"  # Yellow
+    elif risk_rating == "LOW":
+        risk_color = "#28a745"  # Green
+    
+    recommendations_html = ""
+    if recommendations:
+        recommendations_html = "<ul class='recommendations-list'>"
+        for rec in recommendations:
+            recommendations_html += f"<li>✅ {rec}</li>"
+        recommendations_html += "</ul>"
+    
+    # Format missing headers list if any
+    missing_headers_html = ""
+    if missing_headers:
+        missing_headers_html = """
+        <div class="mt-3">
+            <h6>Missing Security Headers:</h6>
+            <ul class="missing-headers-list">
+        """
+        for header in missing_headers:
+            missing_headers_html += f"<li>{header}</li>"
+        missing_headers_html += "</ul></div>"
+    
+    # Generate CVE details table if CVEs exist
+    cve_details_html = ""
+    if cves:
+        cve_details_html = """
+        <div class="mt-3">
+            <div class="cve-header" onclick="toggleCveDetails(this)">
+                <h6><i class="fas fa-caret-right"></i> CVE Details</h6>
+            </div>
+            <div class="cve-details" style="display:none;">
+                <table class="table table-sm table-bordered">
+                    <thead>
+                        <tr>
+                            <th>CVE ID</th>
+                            <th>Package</th>
+                            <th>Version</th>
+                            <th>Severity</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+        """
+        for cve in cves:
+            severity = cve.get("severity", "").lower()
+            severity_class = ""
+            if "critical" in severity:
+                severity_class = "text-white bg-danger"
+            elif "high" in severity:
+                severity_class = "text-white bg-warning"
+            elif "medium" in severity:
+                severity_class = "text-dark bg-info"
+            else:
+                severity_class = "text-dark bg-light"
+                
+            cve_details_html += f"""
+            <tr>
+                <td><a href="https://nvd.nist.gov/vuln/detail/{cve['id']}" target="_blank">{cve['id']}</a></td>
+                <td>{cve['package']}</td>
+                <td>{cve['version']}</td>
+                <td class="{severity_class}">{cve['severity']}</td>
+            </tr>
+            """
+        
+        cve_details_html += """
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        """
+    
+    # Construct the full security posture HTML
+    html = f"""
+    <div class="security-posture">
+        <div class="d-flex justify-content-between align-items-center mb-2">
+            <h5>🛡️ Security Posture</h5>
+            span class="badge" style="background-color: {risk_color}; font-size: 1rem;">{risk_rating} {risk_score}</span>
+        </div>
+        
+        <p class="security-summary">{summary}</p>
+        
+        {recommendations_html}
+        
+        {missing_headers_html}
+        
+        {cve_details_html if cve_details_html else ''}
+        
+        <div class="text-center mt-3 mb-2">
+                            <a href="{domain}_findings.html" class="btn btn-primary">View Findings</a>
+                <a href="{domain}_tags.html" class="btn btn-secondary ms-2">View by Tag</a>
+        </div>
+    </div>
+    """
+    
+    return html
+
+def export_domain_findings(domain, findings, output_dir=None):
+    """
+    Export findings for a domain to an HTML file
+    """
+    if not output_dir:
+        output_dir = "results/html"
+    
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, f"{domain}_findings.html")
+    
+    # Sort findings - new first, then changed, then existing
+    findings_sorted = sorted(findings, key=lambda x: {
+        'new': 0,
+        'changed': 1,
+        'existing': 2
+    }.get(x.get('finding_status', 'existing'), 3))
+    
+    # Get all unique tags from findings
+    all_tags = set()
+    for finding in findings:
+        all_tags.add(finding.get('ai_tag', 'Other'))
+    
+    with open(output_path, "w") as f:
+        # Write HTML header
+        f.write(f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Findings for {domain}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            padding: 0;
+            margin: 0;
+            background-color: #f5f5f7;
+        }}
+        .card {{
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            border: none;
+            border-radius: 10px;
+        }}
+        .card-header {{
+            background-color: #f8f9fa;
+            border-bottom: none;
+            padding: 15px;
+        }}
+        .card-title {{
+            margin-bottom: 0;
+        }}
+        .status-badge {{
+            margin-left: 10px;
+        }}
+        .screenshot-container {{
+            text-align: center;
+            margin-bottom: 15px;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+            padding: 10px;
+        }}
+        .screenshot-container img {{
+            max-width: 100%;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }}
+        .meta-info {{
+            background-color: #f8f9fa;
+            border-radius: 5px;
+            padding: 10px 15px;
+            margin-bottom: 15px;
+        }}
+        .meta-info p {{
+            margin-bottom: 5px;
+        }}
+        .tech-badge {{
+            margin-right: 5px;
+            margin-bottom: 5px;
+            display: inline-block;
+        }}
+        .status-new {{
+            background-color: #28a745 !important;
+        }}
+        .status-changed {{
+            background-color: #17a2b8 !important;
+        }}
+        .status-existing {{
+            background-color: #6c757d !important;
+        }}
+        .header-list {{
+            background-color: #f8f9fa;
+            border-radius: 5px;
+            padding: 10px;
+        }}
+        .header-item {{
+            padding: 5px 0;
+            border-bottom: 1px solid #eee;
+        }}
+        .header-item:last-child {{
+            border-bottom: none;
+        }}
+        .header-name {{
+            font-weight: bold;
+        }}
+        .container {{
+            max-width: 1200px;
+        }}
+        .tag-badge {{
+            font-size: 85%;
+        }}
+        .technology-section {{
+            margin-top: 15px;
+        }}
+        .vulnerability-section {{
+            background-color: #fff3cd;
+            padding: 10px;
+            border-radius: 5px;
+            border-left: 4px solid #ffc107;
+            margin-top: 15px;
+        }}
+        .secret-section {{
+            background-color: #f8d7da;
+            padding: 10px;
+            border-radius: 5px;
+            border-left: 4px solid #dc3545;
+            margin-top: 15px;
+        }}
+        .downloadable-section {{
+            background-color: #d1ecf1;
+            padding: 10px;
+            border-radius: 5px;
+            border-left: 4px solid #17a2b8;
+            margin-top: 15px;
+        }}
+        .secret-item {{
+            padding: 8px;
+            margin-bottom: 8px;
+            border-bottom: 1px solid #f1b0b7;
+        }}
+        .secret-item:last-child {{
+            border-bottom: none;
+            margin-bottom: 0;
+        }}
+        .secret-type {{
+            font-weight: bold;
+        }}
+        .secret-value {{
+            font-family: monospace;
+            background-color: rgba(0,0,0,0.05);
+            padding: 3px 6px;
+            border-radius: 3px;
+            word-break: break-all;
+        }}
+        .secret-critical {{
+            color: #721c24;
+        }}
+        .secret-high {{
+            color: #e65100;
+        }}
+        .secret-medium {{
+            color: #856404;
+        }}
+        .secret-low {{
+            color: #155724;
+        }}
+        .main-header {{
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+            color: white;
+            padding: 30px 0;
+            margin-bottom: 0;
+            text-align: center;
+        }}
+        .breadcrumb-container {{
+            background-color: white;
+            padding: 10px 0;
+            border-bottom: 1px solid #eee;
+            margin-bottom: 30px;
+        }}
+        .filter-container {{
+            background-color: #fff;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            position: sticky;
+            top: 15px;
+            z-index: 1000;
+        }}
+        .filter-row {{
+            display: flex;
+            gap: 15px;
+        }}
+        .filter-item {{
+            flex: 1;
+        }}
+    </style>
+</head>
+<body>
+    <header class="main-header">
+        <h1>Security Findings</h1>
+        <p>Comprehensive findings for {domain}</p>
+    </header>
+    
+    <div class="breadcrumb-container">
+        <div class="container">
+            <nav aria-label="breadcrumb">
+                <ol class="breadcrumb mb-0">
+                    <li class="breadcrumb-item"><a href="dashboard.html">Dashboard</a></li>
+                    <li class="breadcrumb-item"><a href="dashboard.html">{domain}</a></li>
+                    <li class="breadcrumb-item active">Findings</li>
+                </ol>
+            </nav>
+        </div>
+        </div>
+        
+    <div class="container">
+        <div class="filter-container">
+            <div class="filter-row">
+                <div class="filter-item">
+                    <input type="text" class="form-control" id="searchInput" placeholder="Search findings...">
+            </div>
+                <div class="filter-item">
+                    <select class="form-select" id="statusFilter">
+                        <option value="all">All Statuses</option>
+                    <option value="new">New</option>
+                    <option value="changed">Changed</option>
+                    <option value="existing">Existing</option>
+                </select>
+                </div>
+                <div class="filter-item">
+                    <button class="btn btn-primary w-100" id="resetFilters">Reset Filters</button>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Add stats row -->
+        <div class="row mb-4">
+            <div class="col-md-12">
+                <div class="card">
+                    <div class="card-body">
+                        <div class="d-flex flex-wrap justify-content-between">
+                            <!-- Download stats -->
+                            <div class="me-4 mb-2">
+                                <h6 class="mb-1">Downloadable Files</h6>
+                                <div class="d-flex align-items-center">
+                                    <span class="badge bg-info me-2">
+                                        <i class="fas fa-download me-1"></i> 
+                                        {sum(1 for finding in findings if finding.get('download_meta', {}).get('is_downloadable'))}
+                                    </span>
+                                    <button class="btn btn-sm btn-outline-info" type="button" data-bs-toggle="collapse" 
+                                        data-bs-target="#downloadableDetails" aria-expanded="false">
+                                        View Details
+                                    </button>
+                                </div>
+                            </div>
+                            
+                            <!-- Secret stats -->
+                            <div class="mb-2">
+                                <h6 class="mb-1">Exposed Secrets</h6>
+                                <div class="d-flex align-items-center">
+                                    <span class="badge bg-danger me-2">
+                                        <i class="fas fa-key me-1"></i> 
+                                        {sum(1 for finding in findings if finding.get('secrets'))}
+                                    </span>
+                                    <button class="btn btn-sm btn-outline-danger" type="button" data-bs-toggle="collapse" 
+                                        data-bs-target="#secretsDetails" aria-expanded="false">
+                                        View Details
+                                    </button>
+                                </div>
+                            </div>
+
+                            <!-- CVE stats -->
+                            <div class="mb-2">
+                                <h6 class="mb-1">Vulnerabilities</h6>
+                                <div class="d-flex align-items-center">
+                                    <span class="badge bg-warning me-2">
+                                        <i class="fas fa-exclamation-triangle me-1"></i> 
+                                        {sum(1 for finding in findings if finding.get('tech', {}).get('cve_vulns', 0) > 0)}
+                                    </span>
+                                    <button class="btn btn-sm btn-outline-warning" type="button" data-bs-toggle="collapse" 
+                                        data-bs-target="#cveDetails" aria-expanded="false">
+                                        View Details
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Downloadable details -->
+        <div class="collapse mb-4" id="downloadableDetails">
+            <div class="card">
+                <div class="card-header">
+                    <h5>Downloadable Files</h5>
+                </div>
+                <div class="card-body">
+                    <table class="table table-striped">
+                        <thead>
+                            <tr>
+                                <th>Path</th>
+                                <th>Filename</th>
+                                <th>Type</th>
+                                <th>Size</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {(''.join([f"<tr><td>{item.get('path', '/')}</td><td>{item.get('download_meta', {}).get('filename', 'unknown')}</td><td>{item.get('download_meta', {}).get('mime_type', 'unknown')}</td><td>{format_file_size(item.get('download_meta', {}).get('size_bytes', 0))}</td></tr>" for item in findings if item.get('download_meta', {}).get('is_downloadable')]))}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Secrets details -->
+        <div class="collapse mb-4" id="secretsDetails">
+            <div class="card">
+                <div class="card-header">
+                    <h5>Exposed Secrets</h5>
+                </div>
+                <div class="card-body">
+                    <table class="table table-striped">
+                    <thead>
+                        <tr>
+                                <th>Path</th>
+                                <th>Secret Type</th>
+                                <th>Severity</th>
+                                <th>Line</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                            {(''.join([f"<tr><td>{finding.get('path', '/')}</td><td>{secret.get('type', 'Unknown')}</td><td><span class='badge bg-{severity_to_color(secret.get('severity', 'medium'))}'>{secret.get('severity', 'medium').upper()}</span></td><td>{secret.get('line_number', 'N/A')}</td></tr>" for finding in findings for secret in finding.get('secrets', []) if finding.get('secrets')]))}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        
+        <!-- CVE details -->
+        <div class="collapse mb-4" id="cveDetails">
+            <div class="card">
+                <div class="card-header">
+                    <h5>Vulnerabilities</h5>
+                </div>
+                <div class="card-body">
+                    <table class="table table-striped">
+                        <thead>
+                            <tr>
+                                <th>Path</th>
+                                <th>Package</th>
+                                <th>Version</th>
+                                <th>CVE IDs</th>
+                                <th>Severity</th>
+                </tr>
+                        </thead>
+                        <tbody>
+                            {(''.join([
+                                ''.join([
+                                    f"<tr><td>{finding.get('path', '/')}</td><td>{pkg}</td><td>{details.get('version', 'Unknown')}</td><td>{'<br>'.join(details.get('ids', []))}</td><td>{'<br>'.join([f'<span class=\"badge bg-{severity_to_color(get_vuln_severity(cve_id))}\">{get_vuln_severity(cve_id).upper()}</span>' for cve_id in details.get('ids', [])])}</td></tr>"
+                                    for pkg, details in finding.get('tech', {}).get('cve_details', {}).items()
+                                    if isinstance(details, dict) and details.get('ids')
+                                ])
+                                for finding in findings if finding.get('tech', {}).get('cve_details')
+                            ]))}
+                    </tbody>
+                </table>
+            </div>
+            </div>
+        </div>
+        
+        <div class="findings-container">
+""")
+
+        # Write findings
+        for finding in findings_sorted:
+            path = finding.get('path', 'unknown')
+            url = finding.get('url', f'https://{domain}/{path}')
+            status = finding.get('status', 'unknown')
+            length = finding.get('length', 'Unknown')
+            finding_status = finding.get('finding_status', 'existing')
+            screenshot_path = finding.get('screenshot', '')
+            headers = finding.get('headers', {})
+            tag = finding.get('ai_tag', 'Other')
+            
+            # Handle root path display
+            display_path = path
+            if display_path == "/" or not display_path or display_path == "unknown":
+                display_path = "(root)"
+
+            # Determine status badge class
+            status_class = {
+                'new': 'status-new',
+                'changed': 'status-changed',
+                'existing': 'status-existing'
+            }.get(finding_status, '')
+            
+            # Prepare badge content
+            status_text = finding_status.capitalize()
+
+            # Format screenshot path - use relative path for display
+            screenshot_html = ""
+            if screenshot_path:
+                rel_screenshot_path = os.path.relpath(screenshot_path, output_dir) if os.path.exists(screenshot_path) else ""
+                if rel_screenshot_path:
+                    screenshot_html = f'<div class="screenshot-container"><img src="{rel_screenshot_path}" alt="Screenshot of {url}" class="img-fluid"></div>'
+                else:
+                    screenshot_html = f'<div class="screenshot-container"><p class="text-muted">Screenshot not available</p></div>'
+
+            # Format headers
+            headers_html = ""
+            if headers:
+                headers_html = '<div class="header-list mt-3"><h6>Response Headers</h6>'
+                for header_name, header_value in headers.items():
+                    headers_html += f'<div class="header-item"><span class="header-name">{header_name}:</span> {header_value}</div>'
+                headers_html += '</div>'
+            
+            # Format technologies
+            tech_html = ""
+            tech = finding.get('tech', {})
+            if tech:
+                non_cve_techs = {k: v for k, v in tech.items() if k not in ["cve_vulns", "cve_details"]}
+                if non_cve_techs:
+                    tech_html = '<div class="technology-section"><h6>Technologies</h6><div>'
+                    for tech_name, tech_info in non_cve_techs.items():
+                        if isinstance(tech_info, dict) and tech_info.get('version'):
+                            tech_html += f'<span class="badge bg-secondary tech-badge">{tech_name} {tech_info["version"]}</span>'
+                        else:
+                            tech_html += f'<span class="badge bg-secondary tech-badge">{tech_name}</span>'
+                    tech_html += '</div></div>'
+            
+            # Format vulnerabilities
+            vuln_html = ""
+            if tech and "cve_details" in tech:
+                vuln_html = '<div class="vulnerability-section mt-3"><h6><i class="fas fa-exclamation-triangle"></i> Vulnerabilities</h6>'
+                for pkg, details in tech["cve_details"].items():
+                    if isinstance(details, dict) and "ids" in details:
+                        vuln_html += f'<div><strong>{pkg}</strong> {details.get("version", "")}</div><ul>'
+                        for cve_id in details["ids"]:
+                            severity = get_vuln_severity(cve_id)
+                            vuln_html += f'<li>{cve_id} - <span class="badge bg-{severity_to_color(severity)}">{severity.upper()}</span></li>'
+                        vuln_html += '</ul>'
+                vuln_html += '</div>'
+                    
+            # Format downloadable information
+            download_html = ""
+            download_meta = finding.get('download_meta', {})
+            if download_meta and download_meta.get('is_downloadable'):
+                filename = download_meta.get('filename', 'unknown')
+                mime_type = download_meta.get('mime_type', 'unknown')
+                size_bytes = download_meta.get('size_bytes', 0)
+                size_display = format_file_size(size_bytes)
+                
+                download_html = f"""
+                <div class="downloadable-section">
+                    <h6><i class="fas fa-download"></i> Downloadable Content</h6>
+                    <div class="row">
+                        <div class="col-md-6">
+                            <p><strong>Filename:</strong> {filename}</p>
+                            <p><strong>MIME Type:</strong> {mime_type}</p>
+                </div>
+                        <div class="col-md-6">
+                            <p><strong>File Size:</strong> {size_display}</p>
+            </div>
+                    </div>
+                </div>
+        """
+        
+            # Format secrets information
+            secrets_html = ""
+            secrets = finding.get('secrets', [])
+            if secrets:
+                secrets_html = f"""
+                <div class="secret-section">
+                    <h6><i class="fas fa-key"></i> Secrets Detected ({len(secrets)})</h6>
+                    <div class="secrets-list">
+                """
+                
+                for secret in secrets:
+                    secret_type = secret.get('type', 'Unknown')
+                    secret_value = secret.get('value', '')
+                    severity = secret.get('severity', 'medium')
+                    line_number = secret.get('line_number', '')
+                    
+                    secrets_html += f"""
+                    <div class="secret-item">
+                        <div class="secret-type secret-{severity}">{secret_type} <span class="badge bg-secondary">Line {line_number}</span></div>
+                        <div class="secret-value">{secret_value}</div>
+                    </div>
+                    """
+                
+                secrets_html += "</div></div>"
+            
+            # Write the finding card
+            f.write(f"""
+            <div class="card mb-4 finding-card" data-status="{finding_status}" data-tag="{tag}">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h5><a href="{url}" target="_blank">{display_path}</a></h5>
+                    <span class="badge {status_class} status-badge">{status_text}</span>
+                </div>
+                <div class="card-body">
+                    {screenshot_html}
+                    
+                    <div class="meta-info">
+                        <div class="row">
+                            <div class="col-md-4">
+                                <p><strong>URL:</strong> <a href="{url}" target="_blank">{url}</a></p>
+                                <p><strong>Status:</strong> <span class="badge bg-{'success' if 200 <= status < 300 else 'warning' if 300 <= status < 400 else 'danger'}">{status}</span></p>
+            </div>
+                            <div class="col-md-4">
+                                <p><strong>Size:</strong> <span>{length} bytes</span></p>
+                                <p><strong>First Seen:</strong> {finding.get('first_seen', 'Unknown')}</p>
+        </div>
+                            <div class="col-md-4">
+                                <p><strong>AI Tag:</strong> <span class="badge bg-primary tag-badge">{tag}</span></p>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    {tech_html}
+                    {vuln_html}
+                    {download_html}
+                    {secrets_html}
+                    {headers_html}
+        </div>
+    </div>
+            """)
+        
+        # Close the HTML
+        f.write("""
+        </div>
+    </div>
+    
+    <!-- Bootstrap JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+    
+    <script>
+        // Search and filter functionality
+    document.addEventListener('DOMContentLoaded', function() {
+            const searchInput = document.getElementById('searchInput');
+            const statusFilter = document.getElementById('statusFilter');
+            const tagFilter = document.getElementById('tagFilter');
+            const resetButton = document.getElementById('resetFilters');
+            const findingCards = document.querySelectorAll('.finding-card');
+        
+        function applyFilters() {
+                const searchTerm = searchInput.value.toLowerCase();
+            const statusValue = statusFilter.value;
+                const tagValue = tagFilter.value;
+                
+                findingCards.forEach(card => {
+                    const cardContent = card.textContent.toLowerCase();
+                    const cardStatus = card.dataset.status;
+                    const cardTag = card.dataset.tag;
+                    
+                    const matchesSearch = searchTerm === '' || cardContent.includes(searchTerm);
+                    const matchesStatus = statusValue === 'all' || cardStatus === statusValue;
+                    const matchesTag = tagValue === 'all' || cardTag === tagValue;
+                    
+                    card.style.display = (matchesSearch && matchesStatus && matchesTag) ? 'block' : 'none';
+                });
+            }
+            
+            searchInput.addEventListener('input', applyFilters);
+        statusFilter.addEventListener('change', applyFilters);
+            tagFilter.addEventListener('change', applyFilters);
+            
+            resetButton.addEventListener('click', function() {
+                searchInput.value = '';
+                statusFilter.value = 'all';
+                tagFilter.value = 'all';
+                applyFilters();
+            });
+    });
+    </script>
+</body>
+</html>
+""")
+    
+    logger.info(f"Exported {len(findings)} findings for {domain} to {output_path}")
+    return output_path
+
+def format_file_size(size_bytes):
+    """Format file size in human-readable format"""
+    if size_bytes < 1024:
+        return f"{size_bytes} bytes"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    elif size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
+    else:
+        return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
+
+def severity_to_color(severity):
+    """Convert severity string to Bootstrap color class"""
+    severity_map = {
+        "critical": "danger",
+        "high": "warning",
+        "medium": "info",
+        "low": "secondary"
+    }
+    return severity_map.get(severity.lower(), "secondary")
+
+

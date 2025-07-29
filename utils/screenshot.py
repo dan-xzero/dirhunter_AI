@@ -48,6 +48,7 @@ except ImportError:
 
 # Check for selenium availability
 _SELENIUM_AVAILABLE = False
+_WEBDRIVER_MANAGER_AVAILABLE = False
 try:
     from selenium import webdriver
     from selenium.webdriver.chrome.options import Options as ChromeOptions
@@ -58,16 +59,20 @@ try:
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
     _SELENIUM_AVAILABLE = True
+    
+    # Add webdriver_manager for automatic driver download
+    try:
+        from webdriver_manager.chrome import ChromeDriverManager
+        from webdriver_manager.firefox import GeckoDriverManager
+        _WEBDRIVER_MANAGER_AVAILABLE = True
+        logger.info("WebDriver Manager available - will auto-download drivers if needed")
+    except ImportError:
+        _WEBDRIVER_MANAGER_AVAILABLE = False
+        logger.warning("WebDriver Manager not available - install with 'pip install webdriver-manager' for automatic driver download")
 except ImportError:
     logger.warning("Selenium not installed - will use fallback screenshot methods")
 
 # Detect whether pure_screenshot is available
-_PURE_SCREENSHOT_AVAILABLE = False
-try:
-    from utils.pure_screenshot import take_screenshot as pure_take_screenshot
-    _PURE_SCREENSHOT_AVAILABLE = True
-except ImportError:
-    _PURE_SCREENSHOT_AVAILABLE = False
 
 # Default concurrency - will be updated by initialize_screenshot_system
 _MAX_WORKERS = 1
@@ -75,6 +80,10 @@ _browser_semaphore = threading.Semaphore(1)
 
 # Browser process timeout
 _BROWSER_PROCESS_TIMEOUT = 30  # seconds
+
+# Add global variable to track the best screenshot method
+_BEST_SCREENSHOT_METHOD = None
+_FIRST_URL_PROCESSED = False
 
 # Clean up any leftover browser processes at module import time
 if resource_manager:
@@ -181,111 +190,75 @@ def clean_browser_environment():
         logger.error(f"Error during aggressive browser cleanup: {e}")
 
 def create_fallback_screenshot(url, output_path):
-    """Create a fallback screenshot when Selenium fails"""
+    """
+    Creates a fallback screenshot file with basic info for URLs that couldn't be screenshotted
+    """
+    import os
+    import time
+    import logging
+    import requests
+    from datetime import datetime
+    from PIL import Image, ImageDraw, ImageFont
+    import re
+    import textwrap
+    
+    logger = logging.getLogger(__name__)
+    
     try:
-        # Try using requests to get page content
-        import os
-        import requests
-        from PIL import Image, ImageDraw
+        # Default values
+        status = "Unknown"
+        title = "Unavailable"
+        content = "Could not fetch content"
         
-        logger.info(f"Creating fallback screenshot for {url}")
-        
-        # Try to fetch page content
+        # Try to fetch content if possible
         try:
-            response = requests.get(url, timeout=15, verify=False, headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124 Safari/537.36'
-            })
-            content = response.text
-            status = response.status_code
+            response = requests.get(url, timeout=10, verify=False)
+            status = f"{response.status_code}"
+            content = response.text[:500] + "..." if len(response.text) > 500 else response.text
             
             # Try to extract title
-            title = None
-            if "<title>" in content and "</title>" in content:
-                title_start = content.find("<title>") + 7
-                title_end = content.find("</title>", title_start)
-                title = content[title_start:title_end].strip()
+            title_match = re.search("<title>(.*?)</title>", response.text, re.IGNORECASE | re.DOTALL)
+            if title_match:
+                title = title_match.group(1).strip()[:100]
+                
         except Exception as e:
-            content = None
-            status = "Error"
-            title = None
-            logger.warning(f"Failed to fetch content from {url}: {e}")
+            logger.error(f"Failed to fetch URL content: {str(e)}")
         
-        # Create a simple image with the URL and status
-        width, height = 1280, 800
-        img = Image.new('RGB', (width, height), color=(240, 240, 240))
-        draw = ImageDraw.Draw(img)
+        # Create a basic image
+        width, height = 1024, 768
+        image = Image.new("RGB", (width, height), color="#FFFFFF")
+        draw = ImageDraw.Draw(image)
         
-        # Draw header bar
-        draw.rectangle([(0, 0), (width, 60)], fill=(70, 130, 180))
-        draw.text((20, 20), f"URL: {url}", fill=(255, 255, 255))
+        # Draw elements
+        draw.rectangle([(0, 0), (width, 60)], fill="#F0F0F0")
+        draw.text((20, 20), f"URL: {url}", fill="#000000")
+        draw.text((20, 80), f"Status: {status}", fill="#000000")
+        draw.text((20, 110), f"Title: {title}", fill="#000000")
+        draw.line([(20, 140), (width-20, 140)], fill="#CCCCCC", width=1)
         
-        # Add content info
-        y_pos = 80
-        draw.text((20, y_pos), f"Status: {status}", fill=(0, 0, 0))
-        y_pos += 30
-        
-        if title:
-            draw.text((20, y_pos), f"Title: {title}", fill=(0, 0, 0))
-            y_pos += 30
-            
-        draw.text((20, y_pos), "Screenshot created with fallback method", fill=(100, 100, 100))
-        y_pos += 30
-        
-        # Add content preview if available
-        if content:
-            content_preview = content[:1000].replace('\n', ' ')
+        # Add content preview
+        y_pos = 160
+        for line in textwrap.wrap(content, width=120):
+            draw.text((20, y_pos), line, fill="#333333")
             y_pos += 20
-            draw.text((20, y_pos), "Content Preview:", fill=(0, 0, 0))
-            y_pos += 20
-            
-            # Add content lines
-            for i in range(0, min(800, len(content_preview)), 80):
-                line = content_preview[i:i+80]
-                draw.text((20, y_pos), line, fill=(60, 60, 60))
-                y_pos += 20
-                if y_pos > height - 20:
-                    break
+            if y_pos > height - 40:
+                draw.text((20, y_pos), "...", fill="#333333")
+                break
+                
+        # Add timestamp
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        draw.text((20, height-30), f"Fallback screenshot created: {timestamp}", fill="#999999")
         
-        # Ensure output directory exists
-        dir_path = os.path.dirname(output_path)
-        if not os.path.exists(dir_path):
-            os.makedirs(dir_path, exist_ok=True)
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
         
-        # Save image and text
-        img.save(output_path)
-        logger.info(f"Fallback image saved to {output_path}")
-        
-        # Save text content if available
-        try:
-            text_path = output_path.rsplit('.', 1)[0] + '.txt'
-            with open(text_path, 'w', encoding='utf-8') as f:
-                f.write(content if content else f"Failed to retrieve content for {url}")
-        except Exception as e:
-            logger.warning(f"Failed to save text content: {e}")
-        
+        # Save the image
+        image.save(output_path)
+        logger.info(f"Created fallback screenshot for {url}")
         return True
+    
     except Exception as e:
-        logger.error(f"Fallback screenshot failed: {e}")
-        
-        # Last resort: create empty files
-        try:
-            import os
-            dir_path = os.path.dirname(output_path)
-            if not os.path.exists(dir_path):
-                os.makedirs(dir_path, exist_ok=True)
-                
-            with open(output_path, 'wb') as f:
-                f.write(b'')
-                
-            text_path = output_path.rsplit('.', 1)[0] + '.txt'
-            with open(text_path, 'w', encoding='utf-8') as f:
-                f.write(f"Screenshot unavailable for {url}")
-                
-            logger.info(f"Created empty placeholder files for {url}")
-        except Exception as inner_e:
-            logger.error(f"Failed to create empty files: {inner_e}")
-        
-        # Return False but don't raise an exception
+        logger.error(f"Fallback screenshot failed: {str(e)}")
         return False
 
 def take_direct_screenshot(url, output_path):
@@ -309,6 +282,72 @@ def take_direct_screenshot(url, output_path):
     except Exception as e:
         logger.error(f"Failed to create output directory: {e}")
         return False
+    
+    # Check if Xvfb is available
+    xvfb_available = False
+    try:
+        result = subprocess.run(['which', 'Xvfb'], capture_output=True, text=True)
+        if result.returncode == 0:
+            xvfb_available = True
+        else:
+            logger.warning("Xvfb not found - will try alternative approach")
+    except Exception:
+        pass
+        
+    # Try headless Chrome directly without Xvfb if not available
+    if not xvfb_available:
+        chrome_binary = find_chrome_binary('chrome')
+        if not chrome_binary:
+            logger.error("Chrome not found for direct screenshot")
+            return False
+            
+        try:
+            # Create a temporary script
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as script:
+                script_path = script.name
+                script.write(f"""#!/bin/bash
+export DBUS_SESSION_BUS_ADDRESS="unix:path=/dev/null"
+
+# Take screenshot with --headless flag
+"{chrome_binary}" --headless=new --disable-gpu --no-sandbox \\
+    --disable-dev-shm-usage --disable-software-rasterizer \\
+    --disable-background-networking --disable-default-apps \\
+    --disable-extensions --disable-sync --disable-translate \\
+    --hide-scrollbars --metrics-recording-only --mute-audio \\
+    --no-first-run --safebrowsing-disable-auto-update \\
+    --screenshot="{output_path}" "{url}" 
+
+# Save page content
+"{chrome_binary}" --headless=new --disable-gpu --no-sandbox \\
+    --disable-extensions --disable-dev-shm-usage \\
+    --dump-dom "{url}" > "{os.path.splitext(output_path)[0]}.txt" 2>/dev/null
+""")
+            
+            # Make script executable
+            os.chmod(script_path, 0o755)
+            
+            # Run the script
+            result = subprocess.run([script_path], 
+                                    capture_output=True, 
+                                    text=True, 
+                                    timeout=60)
+            
+            # Check if screenshot was created
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                logger.info(f"Direct screenshot saved to {output_path}")
+                return True
+            else:
+                logger.error(f"Direct screenshot failed: {result.stderr}")
+                return False
+        except Exception as e:
+            logger.error(f"Error taking direct screenshot without Xvfb: {e}")
+            return False
+        finally:
+            # Clean up the script
+            try:
+                os.unlink(script_path)
+            except Exception:
+                pass
     
     # Find an available display number
     display_num = 99
@@ -389,9 +428,15 @@ kill $XVFB_PID 2>/dev/null || true
             os.unlink(script_path)
         except Exception:
             pass
-
+        
 def take_screenshot(url, output_path, priority="normal"):
-    """Take a screenshot of a URL with smart strategy selection
+    """Take a screenshot of a URL with robust tiered strategy selection
+    
+    Implements a multi-tiered fallback approach:
+    1. Direct browser command (most reliable in restricted environments)
+    2. Browser screenshot with multiple configurations 
+    3. Resource-aware Selenium approach (adjusts parallelism based on system)
+    4. Fallback image generation as last resort
     
     Args:
         url: The URL to capture
@@ -401,23 +446,311 @@ def take_screenshot(url, output_path, priority="normal"):
     Returns:
         bool: True if successful, False otherwise
     """
+    global _BEST_SCREENSHOT_METHOD, _FIRST_URL_PROCESSED
     import os
     
-    # First try direct screenshot method as it's most reliable
+    # Ensure output directory exists
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except Exception as e:
+            logger.error(f"Failed to create output directory '{output_dir}': {e}")
+            return False
+    
     logger.info(f"Taking screenshot of {url} with {priority} priority")
-    success = take_direct_screenshot(url, output_path)
     
-    # If direct method fails, try browser screenshot
-    if not success:
-        logger.info(f"Direct screenshot failed, trying browser screenshot for {url}")
+    # For the first URL, try all tiers to determine the best method
+    if not _FIRST_URL_PROCESSED:
+        logger.info(f"First URL: Determining optimal screenshot method for {url}")
+        _FIRST_URL_PROCESSED = True
+        
+        # Tier 1: Direct screenshot method (most reliable in many environments)
+        logger.info(f"Tier 1: Trying direct browser command method")
+        success = take_direct_screenshot(url, output_path)
+        if success:
+            _BEST_SCREENSHOT_METHOD = "direct"
+            logger.info(f"✓ Direct browser command method successful - will use for subsequent URLs")
+            return True
+        
+        # Tier 2: If direct method fails, try browser screenshot with multiple configs
+        logger.info(f"Tier 1 failed, trying Tier 2: Browser with multiple configurations for {url}")
         success = take_browser_screenshot(url, output_path)
-    
-    # If browser screenshot fails too, try fallback
-    if not success:
-        logger.info(f"Browser screenshot failed, using fallback for {url}")
+        if success:
+            _BEST_SCREENSHOT_METHOD = "browser"
+            logger.info(f"✓ Browser configurations method successful - will use for subsequent URLs")
+            return True
+        
+        # Tier 3: If browser configs fail, try resource-aware Selenium approach
+        logger.info(f"Tier 2 failed, trying Tier 3: Resource-aware Selenium approach for {url}")
+        success = take_resource_aware_screenshot(url, output_path)
+        if success:
+            _BEST_SCREENSHOT_METHOD = "resource-aware"
+            logger.info(f"✓ Resource-aware Selenium method successful - will use for subsequent URLs")
+            return True
+        
+        # Tier 4: If all browser methods fail, use fallback image generation
+        logger.info(f"Tier 3 failed, using Tier 4: Fallback image generation for {url}")
         success = create_fallback_screenshot(url, output_path)
+        if success:
+            _BEST_SCREENSHOT_METHOD = "fallback"
+            logger.info(f"✓ Fallback image generation successful - will use for subsequent URLs")
+            return True
+            
+        # If everything failed, we have no best method
+        logger.error(f"All screenshot methods failed for {url}")
+        _BEST_SCREENSHOT_METHOD = "fallback"  # Default to fallback as last resort
+        return False
+    
+    # For subsequent URLs, use the best method determined from the first URL
+    logger.info(f"Using previously determined optimal method ({_BEST_SCREENSHOT_METHOD}) for {url}")
+    
+    success = False
+    if _BEST_SCREENSHOT_METHOD == "direct":
+        success = take_direct_screenshot(url, output_path)
+    elif _BEST_SCREENSHOT_METHOD == "browser":
+        success = take_browser_screenshot(url, output_path)
+    elif _BEST_SCREENSHOT_METHOD == "resource-aware":
+        success = take_resource_aware_screenshot(url, output_path)
+    else:  # fallback
+        success = create_fallback_screenshot(url, output_path)
+        
+    # If the chosen method fails, try fallbacks
+    if not success:
+        logger.warning(f"Preferred method {_BEST_SCREENSHOT_METHOD} failed, trying fallbacks for {url}")
+        
+        # Try remaining methods in order
+        if _BEST_SCREENSHOT_METHOD == "direct":
+            logger.info(f"Trying browser configurations for {url}")
+            success = take_browser_screenshot(url, output_path)
+            if not success:
+                logger.info(f"Trying resource-aware Selenium for {url}")
+                success = take_resource_aware_screenshot(url, output_path)
+                if not success:
+                    logger.info(f"Trying fallback image for {url}")
+                    success = create_fallback_screenshot(url, output_path)
+        elif _BEST_SCREENSHOT_METHOD == "browser":
+            logger.info(f"Trying resource-aware Selenium for {url}")
+            success = take_resource_aware_screenshot(url, output_path)
+            if not success:
+                logger.info(f"Trying fallback image for {url}")
+                success = create_fallback_screenshot(url, output_path)
+        elif _BEST_SCREENSHOT_METHOD == "resource-aware":
+            logger.info(f"Trying fallback image for {url}")
+            success = create_fallback_screenshot(url, output_path)
     
     return success
+
+def take_resource_aware_screenshot(url, output_path, minimal_mode=False, ultra_minimal_mode=False):
+    """Take a screenshot with resource-aware settings
+    
+    Args:
+        url: URL to screenshot
+        output_path: Path to save screenshot
+        minimal_mode: Use minimal browser settings (less memory/CPU)
+        ultra_minimal_mode: Use ultra-minimal settings (for low resources)
+        
+    Returns:
+        bool: True if successful
+    """
+    if not _SELENIUM_AVAILABLE:
+        logger.warning("Cannot take resource-aware screenshot, Selenium not available")
+        return False
+        
+    success = False
+    driver = None
+    process_pid = None
+    browser_type = None
+    
+    try:
+        # Create a unique temporary directory for browser user data
+        temp_dir = os.path.join(tempfile.gettempdir(), f"browser_{uuid.uuid4().hex}")
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        # Get browser configurations with resource-aware options
+        browser_configs = get_browser_configs(temp_dir)
+        
+        # If in minimal mode, modify the configurations to use less resources
+        if minimal_mode or ultra_minimal_mode:
+            minimal_configs = []
+            for config in browser_configs:
+                if config.get('type') == 'chrome':
+                    options = config.get('options')
+                    # Add more aggressive memory-saving options
+                    options.add_argument('--js-flags=--expose-gc')
+                    options.add_argument('--single-process')
+                    options.add_argument('--disable-application-cache')
+                    options.add_argument('--disable-dev-shm-usage')
+                    options.add_argument('--disable-accelerated-2d-canvas')
+                    options.add_argument('--disable-web-security')
+                    options.add_argument('--disk-cache-size=1')
+                    
+                    # Ultra minimal mode disables even more features
+                    if ultra_minimal_mode:
+                        options.add_argument('--disable-features=TranslateUI,BlinkGenPropertyTrees')
+                        options.add_argument('--disable-extensions')
+                        options.add_argument('--disable-component-extensions-with-background-pages')
+                        options.add_argument('--disable-background-networking')
+                        options.add_argument('--disable-component-update')
+                        options.add_argument('--disable-domain-reliability')
+                        options.add_argument('--disable-backgrounding-occluded-windows')
+                    
+                    minimal_configs.append(config)
+                    
+                elif config.get('type') == 'firefox' and len(minimal_configs) < 1:
+                    # Only include Firefox in minimal mode if we have no Chrome config
+                    options = config.get('options')
+                    # Add memory settings for Firefox
+                    options.set_preference('browser.cache.disk.enable', False)
+                    options.set_preference('browser.cache.memory.enable', False)
+                    minimal_configs.append(config)
+            
+            # Replace configs with minimal subset
+            browser_configs = minimal_configs if minimal_configs else browser_configs[:1]
+        
+        # Try browser configurations
+        for browser_config in browser_configs:
+            try:
+                # Get browser type and options
+                browser_type = browser_config.get('type', 'chrome')
+                options = browser_config.get('options')
+                
+                # Setup driver with timeout
+                logger.info(f"Initializing resource-aware {browser_type} for {url}")
+                
+                if browser_type == 'chrome':
+                    # Try to find chromedriver
+                    driver_path = find_chrome_binary('chromedriver')
+                    if driver_path:
+                        service = ChromeService(executable_path=driver_path)
+                        driver = webdriver.Chrome(service=service, options=options)
+                    else:
+                        # Use webdriver_manager if available
+                        if _WEBDRIVER_MANAGER_AVAILABLE:
+                            try:
+                                from webdriver_manager.chrome import ChromeDriverManager
+                                service = ChromeService(ChromeDriverManager().install())
+                                driver = webdriver.Chrome(service=service, options=options)
+                            except Exception as e:
+                                logger.warning(f"WebDriver manager failed: {e}")
+                                # Let Selenium try to find the driver
+                                driver = webdriver.Chrome(options=options)
+                        else:
+                            # Let Selenium try to find the driver
+                            driver = webdriver.Chrome(options=options)
+                else:  # Firefox
+                    # Try to find geckodriver
+                    driver_path = find_firefox_binary('geckodriver')
+                    if driver_path:
+                        service = FirefoxService(executable_path=driver_path)
+                        driver = webdriver.Firefox(service=service, options=options)
+                    else:
+                        # Use webdriver_manager if available
+                        if _WEBDRIVER_MANAGER_AVAILABLE:
+                            try:
+                                from webdriver_manager.firefox import GeckoDriverManager
+                                service = FirefoxService(GeckoDriverManager().install())
+                                driver = webdriver.Firefox(service=service, options=options)
+                            except Exception as e:
+                                logger.warning(f"WebDriver manager failed: {e}")
+                                # Let Selenium try to find the driver
+                                driver = webdriver.Firefox(options=options)
+                        else:
+                            # Let Selenium try to find the driver
+                            driver = webdriver.Firefox(options=options)
+                
+                # Record process ID for cleanup
+                try:
+                    if hasattr(driver.service, 'process') and driver.service.process:
+                        process_pid = driver.service.process.pid
+                except Exception:
+                    pass
+                
+                # Use very minimal settings for resource-constrained environments
+                driver.set_page_load_timeout(15)  # Shorter timeout
+                
+                # Navigate with reduced wait time in minimal modes
+                logger.info(f"Navigating to {url} with resource-aware settings")
+                try:
+                    driver.get(url)
+                except Exception as e:
+                    logger.warning(f"Navigation timeout in resource-aware mode: {e}")
+                
+                # Shorter wait time in minimal modes
+                time_to_wait = 0.5 if ultra_minimal_mode else 1.0
+                time.sleep(time_to_wait)
+                
+                # Stop all resource loading immediately in ultra minimal mode
+                if ultra_minimal_mode:
+                    try:
+                        driver.execute_script("window.stop();")
+                    except Exception:
+                        pass
+                
+                # Ensure output directory exists
+                dir_path = os.path.dirname(output_path)
+                if not os.path.exists(dir_path):
+                    os.makedirs(dir_path, exist_ok=True)
+                
+                # Take screenshot with minimal error handling
+                try:
+                    driver.save_screenshot(output_path)
+                    logger.info(f"Resource-aware screenshot saved to {output_path}")
+                    
+                    # Minimal text extraction
+                    try:
+                        text_path = output_path.rsplit('.', 1)[0] + '.txt'
+                        with open(text_path, 'w', encoding='utf-8') as f:
+                            f.write(f"Title: {driver.title}\n")
+                            f.write(f"URL: {driver.current_url}\n")
+                    except Exception:
+                        pass
+                        
+                    success = True
+                    break
+                except Exception as e:
+                    logger.warning(f"Failed to save resource-aware screenshot: {e}")
+            except Exception as e:
+                logger.warning(f"Resource-aware browser config failed: {e}")
+                
+            # Clean up driver if created but failed
+            if driver:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+                
+        return success
+    except Exception as e:
+        logger.error(f"Resource-aware screenshot failed: {e}")
+        return False
+    finally:
+        # Release semaphore
+        _browser_semaphore.release()
+        
+        # Ensure driver is properly closed
+        if driver:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+        
+        # Try to kill the process directly if we have the PID
+        if process_pid:
+            try:
+                try:
+                    os.kill(process_pid, signal.SIGTERM)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        
+        # Clean up temporary directories
+        try:
+            if temp_dir and os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir, ignore_errors=True)
+        except Exception:
+            pass
 
 def take_browser_screenshot(url, output_path):
     """Take a screenshot using a browser (Selenium) with minimal resource usage"""
@@ -472,8 +805,19 @@ def take_browser_screenshot(url, output_path):
                         service = ChromeService(executable_path=driver_path)
                         driver = webdriver.Chrome(service=service, options=options)
                     else:
-                        # Let Selenium try to find the driver
-                        driver = webdriver.Chrome(options=options)
+                        # Use webdriver_manager if available
+                        if _WEBDRIVER_MANAGER_AVAILABLE:
+                            try:
+                                from webdriver_manager.chrome import ChromeDriverManager
+                                service = ChromeService(ChromeDriverManager().install())
+                                driver = webdriver.Chrome(service=service, options=options)
+                            except Exception as e:
+                                logger.warning(f"WebDriver manager failed: {e}")
+                                # Let Selenium try to find the driver
+                                driver = webdriver.Chrome(options=options)
+                        else:
+                            # Let Selenium try to find the driver
+                            driver = webdriver.Chrome(options=options)
                 else:  # Firefox
                     # Try to find geckodriver
                     driver_path = find_firefox_binary('geckodriver')
@@ -481,8 +825,19 @@ def take_browser_screenshot(url, output_path):
                         service = FirefoxService(executable_path=driver_path)
                         driver = webdriver.Firefox(service=service, options=options)
                     else:
-                        # Let Selenium try to find the driver
-                        driver = webdriver.Firefox(options=options)
+                        # Use webdriver_manager if available
+                        if _WEBDRIVER_MANAGER_AVAILABLE:
+                            try:
+                                from webdriver_manager.firefox import GeckoDriverManager
+                                service = FirefoxService(GeckoDriverManager().install())
+                                driver = webdriver.Firefox(service=service, options=options)
+                            except Exception as e:
+                                logger.warning(f"WebDriver manager failed: {e}")
+                                # Let Selenium try to find the driver
+                                driver = webdriver.Firefox(options=options)
+                        else:
+                            # Let Selenium try to find the driver
+                            driver = webdriver.Firefox(options=options)
                 
                 # Record process ID if possible to ensure cleanup
                 try:
@@ -533,55 +888,59 @@ def take_browser_screenshot(url, output_path):
                     """)
                 except Exception:
                     pass
-                
-                # Ensure output directory exists
+        
                 dir_path = os.path.dirname(output_path)
                 if not os.path.exists(dir_path):
                     os.makedirs(dir_path, exist_ok=True)
-                
+        
                 # Take screenshot
-                driver.save_screenshot(output_path)
-                logger.info(f"Screenshot saved to {output_path}")
-                
-                # Save minimal page content - only essentials like title and meta tags
                 try:
-                    text_path = output_path.rsplit('.', 1)[0] + '.txt'
-                    with open(text_path, 'w', encoding='utf-8') as f:
-                        try:
-                            # Extract only the essentials
-                            title = driver.title
-                            current_url = driver.current_url
-                            
-                            # Get meta description if exists
-                            meta_desc = ""
+                    driver.save_screenshot(output_path)
+                    logger.info(f"Screenshot saved to {output_path}")
+                    
+                    # Save minimal page content - only essentials like title and meta tags
+                    try:
+                        text_path = output_path.rsplit('.', 1)[0] + '.txt'
+                        with open(text_path, 'w', encoding='utf-8') as f:
                             try:
-                                meta_elements = driver.find_elements(By.XPATH, "//meta[@name='description']")
-                                if meta_elements:
-                                    meta_desc = meta_elements[0].get_attribute("content")
-                            except Exception:
-                                pass
+                                # Extract only the essentials
+                                title = driver.title
+                                current_url = driver.current_url
                                 
-                            # Write minimal content
-                            f.write(f"Title: {title}\n")
-                            f.write(f"URL: {current_url}\n")
-                            if meta_desc:
-                                f.write(f"Description: {meta_desc}\n")
-                        except Exception:
-                            # If extraction fails, save full page source as fallback
-                            f.write(driver.page_source)
+                                # Get meta description if exists
+                                meta_desc = ""
+                                try:
+                                    meta_elements = driver.find_elements(By.XPATH, "//meta[@name='description']")
+                                    if meta_elements:
+                                        meta_desc = meta_elements[0].get_attribute("content")
+                                except Exception:
+                                    pass
+                                    
+                                # Write minimal content
+                                f.write(f"Title: {title}\n")
+                                f.write(f"URL: {current_url}\n")
+                                if meta_desc:
+                                    f.write(f"Description: {meta_desc}\n")
+                            except Exception:
+                                # If extraction fails, save full page source as fallback
+                                f.write(driver.page_source)
+                    except Exception as e:
+                        logger.warning(f"Failed to save page text: {e}")
+                    
+                    success = True
+                    break  # Break out of the browser configurations loop
                 except Exception as e:
-                    logger.warning(f"Failed to save page text: {e}")
-                
-                success = True
-                break
+                    logger.warning(f"Failed to save screenshot: {e}")
             except Exception as e:
                 logger.warning(f"Browser config {browser_config.get('name')} failed: {e}")
-                if driver:
-                    try:
-                        driver.quit()
-                    except Exception as qe:
-                        logger.warning(f"Failed to quit driver: {qe}")
-                    driver = None
+                
+            # Clean up driver if it was created but failed
+            if driver:
+                try:
+                    driver.quit()
+                except Exception as qe:
+                    logger.warning(f"Failed to quit driver: {qe}")
+                driver = None
         
         if not success:
             logger.error(f"All browser configurations failed for {url}")
@@ -593,6 +952,9 @@ def take_browser_screenshot(url, output_path):
         logger.error(f"Screenshot failed: {e}")
         return False
     finally:
+        # Release the semaphore
+        _browser_semaphore.release()
+        
         # Ensure driver is properly closed
         if driver:
             try:
@@ -632,9 +994,6 @@ def take_browser_screenshot(url, output_path):
                 logger.debug(f"Removed temporary directory {temp_dir}")
         except Exception as e:
             logger.warning(f"Failed to clean up temp dir: {e}")
-        
-        # Release semaphore
-        _browser_semaphore.release()
 
 def get_browser_configs(temp_dir):
     """Get a list of browser configurations to try in order"""
@@ -797,6 +1156,13 @@ def find_chrome_binary(binary_name='chrome'):
             "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"
         ]
     elif binary_name == 'chromedriver':
+        if _WEBDRIVER_MANAGER_AVAILABLE:
+            try:
+                from webdriver_manager.chrome import ChromeDriverManager
+                return ChromeDriverManager().install()
+            except Exception as e:
+                logger.warning(f"ChromeDriverManager failed: {e}")
+        
         possible_paths = [
             "/usr/bin/chromedriver",
             "/usr/local/bin/chromedriver",
@@ -834,6 +1200,13 @@ def find_firefox_binary(binary_name='firefox'):
             "C:\\Program Files (x86)\\Mozilla Firefox\\firefox.exe"
         ]
     elif binary_name == 'geckodriver':
+        if _WEBDRIVER_MANAGER_AVAILABLE:
+            try:
+                from webdriver_manager.firefox import GeckoDriverManager
+                return GeckoDriverManager().install()
+            except Exception as e:
+                logger.warning(f"GeckoDriverManager failed: {e}")
+        
         possible_paths = [
             "/usr/bin/geckodriver",
             "/usr/local/bin/geckodriver",
@@ -875,88 +1248,39 @@ def filter_screenshot_tasks(findings):
     return unique_findings
 
 def take_screenshots_parallel(task_list, max_workers=3):
-    """Take screenshots sequentially with priority-based processing
+    """Take screenshots of multiple URLs in parallel
     
-    This version:
-    1. Prioritizes important screenshots first
-    2. Takes screenshots one at a time to reduce resource usage
-    3. Performs a single cleanup at the start and end, not between screenshots
+    Args:
+        task_list: List of (url, output_path, priority) tuples
+        max_workers: Maximum number of concurrent workers
+    
+    Returns:
+        dict: Results with URLs as keys and success status as values
     """
-    # Initialize the screenshot system (but don't prepare browsers yet)
-    initialize_screenshot_system(max_workers=1)  # Set to 1 since we're processing sequentially
+    global _FIRST_URL_PROCESSED, _BEST_SCREENSHOT_METHOD
     
-    # If task list is empty, nothing to do
-    if not task_list:
-        return
-        
-    logger.info(f"Taking {len(task_list)} screenshots sequentially")
+    # Reset the best method for each batch
+    _FIRST_URL_PROCESSED = False
+    _BEST_SCREENSHOT_METHOD = None
     
-    # Process high priority screenshots first
-    high_priority_tasks = [task for task in task_list 
-                          if task.get('priority', 'normal') == 'high']
-    normal_priority_tasks = [task for task in task_list 
-                            if task.get('priority', 'normal') == 'normal']
-    low_priority_tasks = [task for task in task_list 
-                         if task.get('priority', 'normal') == 'low']
+    logger.info(f"Taking screenshots for {len(task_list)} URLs with {max_workers} workers")
     
-    # Process in batches by priority
-    all_batches = [
-        ("high priority", high_priority_tasks),
-        ("normal priority", normal_priority_tasks),
-        ("low priority", low_priority_tasks)
-    ]
+    # Process the high priority URLs first
+    task_list = sorted(task_list, key=lambda x: 0 if x[2] == "high" else 1)
     
-    # Clean environment ONCE before starting any screenshots
-    # This will remove any leftover browser processes
-    clean_browser_environment()
+    results = {}
     
-    total_completed = 0
-    total_tasks = len(task_list)
+    # Take screenshots sequentially to avoid resource issues
+    for url, output_path, priority in task_list:
+        try:
+            success = take_screenshot(url, output_path, priority)
+            results[url] = success
+            logger.info(f"{'✓' if success else '✗'} Screenshot for {url}")
+        except Exception as e:
+            logger.error(f"Error taking screenshot for {url}: {e}")
+            results[url] = False
     
-    for batch_idx, (batch_name, batch_tasks) in enumerate(all_batches):
-        if not batch_tasks:
-            continue
-            
-        logger.info(f"Processing {len(batch_tasks)} {batch_name} screenshots")
-        
-        # Process each task in this batch sequentially
-        batch_completed = 0
-        
-        for task in batch_tasks:
-            try:
-                # Take screenshot for this URL
-                logger.info(f"Taking screenshot for {task['url']}")
-                success = take_screenshot(
-                    task['url'], 
-                    task['output_path'],
-                    task.get('priority', 'normal')
-                )
-                
-                # Log result
-                if success:
-                    logger.info(f"✓ Screenshot for {task['url']}")
-                else:
-                    logger.warning(f"✗ Failed screenshot for {task['url']}")
-                    
-                # Update progress
-                batch_completed += 1
-                total_completed += 1
-                
-                if batch_completed % 5 == 0 or batch_completed == len(batch_tasks):
-                    logger.info(f"Batch progress: {batch_completed}/{len(batch_tasks)}")
-                
-                if total_completed % 10 == 0 or total_completed == total_tasks:
-                    logger.info(f"Overall progress: {total_completed}/{total_tasks}")
-                    
-                # Small delay between screenshots 
-                time.sleep(0.5)
-                
-            except Exception as e:
-                logger.error(f"Error in screenshot task for {task['url']}: {e}")
-        
-    # Final cleanup after all screenshots
-    logger.info("Screenshot tasks completed, performing final cleanup")
-    clean_browser_environment()
+    return results
 
 # For testing
 if __name__ == "__main__":

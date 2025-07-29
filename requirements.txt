@@ -1,10 +1,32 @@
-openai>=1.33.0
-selenium>=4.20.0
-python-dotenv>=1.0.1
+# Core dependencies
+selenium>=4.0.0
+webdriver-manager>=3.8.0
+beautifulsoup4>=4.12.0
+openai>=1.0.0
 requests>=2.31.0
-python-Wappalyzer>=0.3.1 
-trufflehog>=3.0.0
-pytest>=8.2.0 
-psutil>=5.9.8 
-Flask==3.0.2
-pillow==10.3.0
+python-dotenv>=1.0.0
+
+# Web framework and API
+flask>=2.3.0
+fastapi>=0.104.0
+uvicorn>=0.24.0
+python-multipart>=0.0.6
+
+# Database and data processing
+sqlite3-to-mysql>=1.0.0
+deepmerge>=1.0.1
+
+# UI and visualization
+swagger-ui-bundle>=0.0.9
+matplotlib>=3.7.0
+Pillow>=10.0.0
+
+# Utilities
+tqdm>=4.65.0
+ruff>=0.1.0
+
+# Slack integration
+slackclient>=2.9.0
+
+# Optional: Fuzzy hashing (for better duplicate detection)
+# ssdeep>=3.4.0  # Uncomment if available in your environment

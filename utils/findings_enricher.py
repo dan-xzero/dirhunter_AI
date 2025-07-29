@@ -10,7 +10,7 @@ def enrich_findings(domain, findings):
     """Add missing data to findings to ensure complete reporting"""
     # Import here to avoid circular imports
     from utils.path_handler import path_manager
-    from utils.screenshot_fallback import create_placeholder_screenshot
+    from utils.screenshot import create_fallback_screenshot
     
     enriched = []
     
@@ -21,6 +21,17 @@ def enrich_findings(domain, findings):
         # Ensure basic fields exist
         finding.setdefault('finding_status', 'existing')
         finding.setdefault('ai_tag', 'Other')
+        
+        # Preserve headers if they exist
+        if 'headers' not in finding:
+            finding['headers'] = {}
+            logger.info(f"No headers found for {finding.get('url', 'unknown')}")
+        else:
+            # Convert headers to a standard dict if needed
+            if not isinstance(finding['headers'], dict):
+                finding['headers'] = dict(finding['headers'])
+            logger.info(f"Found {len(finding['headers'])} headers for {finding.get('url', 'unknown')}")
+            logger.info(f"Headers: {list(finding['headers'].keys())}")
         
         # Ensure tech dict exists
         if 'tech' not in finding or not finding['tech']:
@@ -67,7 +78,7 @@ def enrich_findings(domain, findings):
                 safe_path = 'root'
             
             screenshot_path = path_manager.get_screenshot_path(domain, f"{safe_path}.png")
-            create_placeholder_screenshot(finding.get('url', domain), screenshot_path)
+            create_fallback_screenshot(finding.get('url', domain), screenshot_path)
             finding['screenshot'] = screenshot_path
         
         enriched.append(finding)
@@ -85,6 +96,8 @@ def save_enriched_findings(domain, findings, output_dir=None):
     
     try:
         filename = os.path.join(output_dir, f"{domain}_enriched.json")
+        if findings and isinstance(findings, list):
+            logger.info(f"First finding keys before save: {list(findings[0].keys())}")
         with open(filename, 'w') as f:
             json.dump(findings, f, indent=2)
         logger.info(f"Saved enriched findings for {domain} to {filename}")

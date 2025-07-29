@@ -1,31 +1,45 @@
 # Python
 __pycache__/
-__pycache__
 *.pyc
 *.pyo
 *.pyd
+*.py[cod]
+*$py.class
 
 # Environments
 .env
 venv/
 ENV/
+env/
+.venv/
 
 # Logs
 *.log
 logs/
+dirhunter_ai.log
 
 # Databases / State
-.db/
+db/
 *.sqlite3
 *.db
+*.sqlite
 
-# Results
+# Results and Output
 results/
-
-# Reports
+backups/
 *.html
 *.csv
 *.json
+
+# Domain and Wordlist Configuration
+domains/
+wordlists/
+
+# Temporary Files
+misclassified_tags.txt
+skipped_domains.txt
+skipped_endpoints.txt
+dirsearch.txt
 
 # Editor/IDE
 .vscode/
@@ -36,12 +50,26 @@ results/
 # OS files
 .DS_Store
 Thumbs.db
-/.env
-/__pycache__
-/db
-/dirsearch.txt
-/logs
-/misclassified_tags.txt
-/results
-/skipped_domains.txt
-/skipped_endpoints.txt
+*.swp
+*.swo
+*~
+
+# Node.js (for Wappalyzer CLI)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Screenshots and Media
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.ico
+
+# Archive files
+*.zip
+*.tar.gz
+*.rar
+*.7z

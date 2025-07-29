@@ -1,10 +1,14 @@
-# utils/tech_fingerprint.py – minimal CLI-only fingerprinting using Wappalyzer JSON output
-import json, subprocess, time, os, sys, urllib.parse, tempfile
+# utils/tech_fingerprint.py – now a wrapper around simple_tech_detector
+import json, time, os
 from pathlib import Path
 from typing import Any, Dict, Optional
-import re as _re
+import urllib.parse
+import logging
 
-RAW_DIR = Path("results/wappalyzer_raw")
+# Configure logging
+logger = logging.getLogger(__name__)
+
+RAW_DIR = Path("results/tech_detection_raw")
 RAW_DIR.mkdir(parents=True, exist_ok=True)
 CACHE_FILE = Path("db/tech_cache.json")
 CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -27,73 +31,40 @@ def _slug(url: str) -> str:
     return (p.netloc or p.path).replace(":", "_").replace("/", "_")
 
 
-def _run_cli(url: str) -> Optional[Dict[str, Any]]:
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
-    tmp.close()
-    cmd = ["wappalyzer", "-i", url, "-oJ", tmp.name]
-    try:
-        out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=30)
-    except FileNotFoundError:
-        # Fallback to module execution (pip install wappalyzer installs entry-point here)
-        cmd = [sys.executable, "-m", "wappalyzer.cli", "-i", url, "-oJ", tmp.name]
-        out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=30)
-    except Exception:
-        return None
-
-    try:
-        data = json.loads(Path(tmp.name).read_text())
-    finally:
-        os.unlink(tmp.name)
-    techs = data.get(url) or next(iter(data.values()), None)
-    if techs is None:
-        return None
-
-    RAW_DIR.joinpath(f"{_slug(url)}.json").write_text(json.dumps(techs, indent=2))
-    return techs
-
-
 def fingerprint(url: str, _headers: str = "", _body: str = "") -> Optional[Dict[str, Any]]:
-    """Return Wappalyzer tech dict for the given URL or None."""
+    """Return technology dict for the given URL or None."""
     cache = _load_cache()
     entry = cache.get(url)
     if entry and time.time() - entry.get("ts", 0) < TTL:
         return entry.get("tech")
 
-    tech = _run_cli(url)
-    if tech is not None:
-        # Build component list for CVE lookup (name + version if present)
-        comps = []
-        for name, info in tech.items():
-            ver = info.get("version") if isinstance(info, dict) else None
-            if not ver:
-                continue
-
-            # --- normalize package name for OSV ---
-            n = name.lower().strip()
-            n = _re.sub(r"[\. ]js$", "", n)  # remove .js or js suffix
-            n = n.replace(" ", "-")           # spaces to dashes (e.g., react dom)
-
-            # explicit mapping overrides
-            explicit = {
-                "next.js": "next",
-                "nextjs": "next",
-                "react": "react",
-                "react-dom": "react-dom",
-            }
-            n = explicit.get(n, n)
-
-            comps.append({"name": n, "version": ver})
-
-        if comps:
-            try:
-                from utils.cve import check_components
-                cve_res = check_components(comps)
-                if cve_res.get("total_vulns"):
-                    tech["cve_vulns"] = cve_res["total_vulns"]
-                    tech["cve_details"] = cve_res["details"]
-            except Exception:
-                pass
-
-        cache[url] = {"tech": tech, "ts": time.time()}
-        _save_cache(cache)
-    return tech 
+    # Import simple_tech_detector here to avoid circular imports
+    try:
+        from utils.simple_tech_detector import detect_technologies
+        
+        logger.info(f"Using browser-free detector for {url}")
+        start_time = time.time()
+        tech = detect_technologies(url)
+        elapsed = time.time() - start_time
+        
+        if tech is not None:
+            logger.info(f"Browser-free detector completed for {url} in {elapsed:.2f}s")
+            
+            # Save raw results
+            RAW_DIR.joinpath(f"{_slug(url)}.json").write_text(json.dumps(tech, indent=2))
+            
+            # Update cache
+            cache[url] = {"tech": tech, "ts": time.time()}
+            _save_cache(cache)
+            
+            return tech
+        else:
+            logger.warning(f"No technologies detected for {url}")
+            return None
+            
+    except ImportError:
+        logger.error("simple_tech_detector module not available")
+        return None
+    except Exception as e:
+        logger.error(f"Error detecting technologies: {e}")
+        return None 

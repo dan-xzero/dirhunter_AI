@@ -12,6 +12,24 @@ from functools import lru_cache
 import requests
 
 from utils.tech_helpers import extract_tech_and_cves, aggregate_cves, severity_from_count, get_vuln_severity
+from utils.path_handler import PathManager
+
+# Try to import findings_enricher functions
+try:
+    from utils.findings_enricher import enrich_findings, save_enriched_findings
+    FINDINGS_ENRICHER_AVAILABLE = True
+except ImportError:
+    logger.warning("findings_enricher not available - using raw findings")
+    FINDINGS_ENRICHER_AVAILABLE = False
+    
+    # Define fallbacks if not available
+    def enrich_findings(domain, findings, extra=None):
+        """Fallback if findings_enricher is not available"""
+        return findings
+        
+    def save_enriched_findings(domain, findings, output_dir=None):
+        """Fallback if findings_enricher is not available"""
+        pass
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -110,627 +128,522 @@ def aggregate_domain_tech(findings: List[Dict]) -> Dict[str, Any]:
     
     return dict(tech_stack)
 
-def create_enhanced_dashboard(all_domains_data, is_update=False):
-    """Create an enhanced dashboard with better visualizations
+# First, let's add a function to categorize technologies
+def categorize_technology(tech_name: str) -> str:
+    """Categorize a technology by its purpose"""
+    # Frontend frameworks and libraries
+    if tech_name in ('React', 'Vue.js', 'Angular', 'jQuery', 'Bootstrap', 'Next.js', 'Nuxt.js', 'Svelte', 'Ember.js', 'Preact'):
+        return 'Frontend'
+    
+    # Backend frameworks and languages
+    elif tech_name in ('Ruby', 'Ruby on Rails', 'Node.js', 'Express', 'Django', 'Flask', 'Laravel', 'Spring', 'ASP.NET', 'PHP'):
+        return 'Backend'
+    
+    # Databases
+    elif tech_name in ('MySQL', 'PostgreSQL', 'MongoDB', 'SQLite', 'Redis', 'Elasticsearch', 'Cassandra', 'DynamoDB'):
+        return 'Database'
+    
+    # Cloud services
+    elif tech_name in ('AWS', 'Azure', 'Google Cloud Platform', 'Firebase', 'Netlify', 'Vercel', 'Heroku', 'AWS EC2', 'AWS Lambda', 'Amazon S3'):
+        return 'Cloud'
+    
+    # CDN and caching
+    elif tech_name in ('Cloudflare', 'Akamai', 'Fastly', 'CloudFront', 'Varnish', 'Nginx'):
+        return 'CDN/Cache'
+    
+    # Analytics and marketing
+    elif tech_name in ('Google Analytics', 'Google Tag Manager', 'Facebook Pixel', 'Hotjar', 'Mixpanel', 'Segment', 'Intercom', 'Mailchimp', 'HubSpot'):
+        return 'Analytics'
+    
+    # CMS
+    elif tech_name in ('WordPress', 'Drupal', 'Joomla', 'Magento', 'Shopify', 'Wix', 'Squarespace', 'Ghost'):
+        return 'CMS'
+    
+    # Security features
+    elif tech_name in ('HSTS', 'Content-Security-Policy', 'Feature-Policy', 'ModSecurity', 'TrustArc'):
+        return 'Security'
+    
+    # Default catch-all
+    return 'Other'
+
+def create_enhanced_dashboard(all_findings, results_dir=None, is_update=False):
+    """
+    Create an enhanced HTML dashboard with visualizations and metrics
     
     Parameters:
-    - all_domains_data: Dictionary mapping domains to their findings
+    - all_findings: Dictionary mapping domains to their findings
+    - results_dir: Directory to save the dashboard
     - is_update: If True, indicates this is an update to an existing dashboard
     """
-    # Import the path manager and findings enricher
     try:
-        from utils.path_handler import path_manager
-        from utils.findings_enricher import enrich_findings, save_enriched_findings
+        # Set default output directory if not provided
+        if not results_dir:
+            results_dir = HTML_REPORT_DIR
         
-        # Fix domain data before processing
-        fixed_data = {}
-        for domain, findings in all_domains_data.items():
-            logger.info(f"Enriching {len(findings)} findings for {domain}")
-            fixed_data[domain] = enrich_findings(domain, findings)
-            save_enriched_findings(domain, fixed_data[domain])
+        # Ensure output directory exists
+        os.makedirs(results_dir, exist_ok=True)
         
-        # Continue with fixed data
-        all_domains_data = fixed_data
-    except ImportError:
-        logger.warning("path_handler or findings_enricher not available - using raw findings")
-    except Exception as e:
-        logger.error(f"Error enriching findings for dashboard: {e}")
+        # Define paths
+        dashboard_path = os.path.join(results_dir, "enhanced_dashboard.html")
         
-    os.makedirs(HTML_REPORT_DIR, exist_ok=True)
-    
-    dashboard_file = os.path.join(HTML_REPORT_DIR, "dashboard.html")
-    
-    # Aggregate statistics
-    total_domains = len(all_domains_data)
-    total_findings = sum(len(findings) for findings in all_domains_data.values())
-    
-    # Enhanced aggregation
-    global_status_counts = defaultdict(int)
-    global_category_counts = defaultdict(int)
-    global_secret_types = defaultdict(int)
-    global_cve_severity = defaultdict(int)
-    domain_data = {}
-    
-    # Create a set to track all unique vulnerability IDs globally
-    global_vuln_ids = set()
-    
-    # Track severity counts with consistent ordering using a dictionary with predefined keys
-    severity_levels = ["Critical", "High", "Medium", "Low"]
-    global_cve_severity = {level: 0 for level in severity_levels}
-    
-    # Process each domain
-    for domain, findings in all_domains_data.items():
-        domain_tech = aggregate_domain_tech(findings)
-        domain_secrets = defaultdict(int)
-        domain_downloadable = False
-        
-        # Use aggregate_cves to get unique CVEs for this domain
-        cve_aggregate = aggregate_cves(findings)
-        # Store the unique CVEs by package
-        domain_cves = {pkg: info["ids"] for pkg, info in cve_aggregate["packages"].items()}
-        
-        # Add vulnerabilities to global set for deduplication
-        for pkg_info in cve_aggregate["packages"].values():
-            global_vuln_ids.update(pkg_info["ids"])
+        # If findings is empty, use domains instead
+        domains = all_findings
+        if not all_findings:
+            logger.warning("No findings data provided for enhanced dashboard")
+            return None
             
-            # Count severity for each individual vulnerability ID
-            for vuln_id in pkg_info["ids"]:
-                severity = get_vuln_severity(vuln_id)
-                global_cve_severity[severity] += 1
+        # Try to enrich findings with extra data
+        try:
+            # Try to import findings enricher (non-essential)
+            # This is optional and we'll continue if it's not available
+            try:
+                from utils.findings_enricher import enrich_findings, save_enriched_findings
+                
+                # Enrich the findings data
+                for domain in list(domains.keys()):
+                    try:
+                        # Call with only the expected arguments
+                        domains[domain] = enrich_findings(domain, domains[domain])
+                    except Exception as e:
+                        logger.warning(f"Failed to enrich findings for {domain}: {e}")
+                        
+                # Save enriched data
+                try:
+                    for domain, findings in domains.items():
+                        save_enriched_findings(domain, findings)
+                except Exception as e:
+                    logger.warning(f"Failed to save enriched findings: {e}")
+            except ImportError:
+                # Define fallback functions if module not available
+                logger.debug("Findings enricher module not available")
+                
+                # These are placeholder functions that just return the original data
+                def enrich_findings(domain, findings):
+                    return findings
+                    
+                def save_enriched_findings(domain, findings, output_dir=None):
+                    pass
+        except Exception as e:
+            logger.warning(f"Error during findings enrichment: {e}")
         
-        for finding in findings:
-            status = finding.get('finding_status', 'unknown')
-            global_status_counts[status] += 1
-            
-            category = finding.get('ai_tag', 'Other')
-            global_category_counts[category] += 1
-            
-            # Check if finding is downloadable
-            if finding.get('downloadable'):
-                domain_downloadable = True
-            
-            # Process secrets with categorization
-            dm = finding.get('download_meta') or {}
-            for secret in dm.get('th_secrets', []):
-                secret_info = categorize_secret(
-                    secret.get('raw', ''),
-                    secret.get('reason', '')
-                )
-                global_secret_types[secret_info['type']] += 1
-                domain_secrets[secret_info['type']] += 1
+        # Calculate dashboard statistics
+        # ---------------------------------
+        # Count total domains and endpoints
+        total_domains = len(domains)
+        total_endpoints = sum(len(findings) for findings in domains.values())
         
-        # Store domain data
-        domain_data[domain] = {
-            'tech_stack': domain_tech,
-            'cve_summary': dict(domain_cves),
-            'secret_types': dict(domain_secrets),
-            'downloadable': domain_downloadable
+        # Count by status
+        finding_stats = Counter()
+        for domain_findings in domains.values():
+            for finding in domain_findings:
+                status = finding.get("finding_status", "unknown")
+                finding_stats[status] += 1
+        
+        # Count vulnerabilities
+        vuln_stats = {"total": 0, "critical": 0, "high": 0, "medium": 0, "low": 0}
+        for domain_findings in domains.values():
+            for finding in domain_findings:
+                tech = finding.get("tech", {})
+                if tech and "cve_details" in tech:
+                    for pkg, details in tech["cve_details"].items():
+                        if isinstance(details, dict) and "ids" in details:
+                            severity = details.get("severity", "").lower()
+                            vuln_count = len(details["ids"])
+                            vuln_stats["total"] += vuln_count
+                            
+                            if "critical" in severity:
+                                vuln_stats["critical"] += vuln_count
+                            elif "high" in severity:
+                                vuln_stats["high"] += vuln_count
+                            elif "medium" in severity:
+                                vuln_stats["medium"] += vuln_count
+                            else:
+                                vuln_stats["low"] += vuln_count
+        
+        # Count secrets
+        secret_stats = {"total": 0}
+        for domain_findings in domains.values():
+            for finding in domain_findings:
+                secrets = finding.get("secrets", [])
+                if secrets:
+                    secret_stats["total"] += len(secrets)
+        
+        # Count and categorize technologies
+        tech_counter = Counter()
+        tech_categories = Counter()
+        
+        # Tech logo mapping for chart display
+        TECH_LOGOS = {
+            "jQuery": "jquery.png",
+            "Bootstrap": "bootstrap.png",
+            "React": "react.png",
+            "Angular": "angular.png",
+            "WordPress": "wordpress.png",
+            "Nginx": "nginx.png",
+            "Apache": "apache.png",
+            "PHP": "php.png",
+            "Node.js": "nodejs.png"
+            # Add more as needed
         }
-    
-    # Build enhanced HTML
-    html = f"""
-    <!DOCTYPE html>
-    <html>
+        
+        for domain_findings in domains.values():
+            for finding in domain_findings:
+                tech = finding.get("tech", {})
+                if tech:
+                    for tech_name in tech.keys():
+                        # Skip metadata keys
+                        if tech_name not in ["cve_vulns", "cve_details"]:
+                            tech_counter[tech_name] += 1
+                            
+                            # Categorize technology
+                            if any(x in tech_name.lower() for x in ["jquery", "bootstrap", "react", "angular", "css"]):
+                                tech_categories["Frontend"] += 1
+                            elif any(x in tech_name.lower() for x in ["php", "node", "django", "flask", "rails"]):
+                                tech_categories["Backend"] += 1
+                            elif any(x in tech_name.lower() for x in ["mysql", "postgres", "mongodb", "sql"]):
+                                tech_categories["Database"] += 1
+                            elif any(x in tech_name.lower() for x in ["aws", "azure", "cloudflare", "cdn"]):
+                                tech_categories["Cloud/CDN"] += 1
+                            elif any(x in tech_name.lower() for x in ["wordpress", "drupal", "joomla", "magento"]):
+                                tech_categories["CMS"] += 1
+                            elif any(x in tech_name.lower() for x in ["analytics", "google tag", "matomo"]):
+                                tech_categories["Analytics"] += 1
+                            else:
+                                tech_categories["Other"] += 1
+        
+        tech_stats = {
+            "total": sum(tech_counter.values()),
+            "unique": len(tech_counter),
+            "top": tech_counter.most_common(10),
+            "categories": {k: v for k, v in tech_categories.most_common()}
+        }
+        
+        # Create the enhanced dashboard
+        with open(dashboard_path, 'w') as f:
+            f.write(f"""<!DOCTYPE html>
+<html lang="en">
     <head>
-        <title>DirHunter AI - Enhanced Security Dashboard</title>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Enhanced Security Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
         <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
         <style>
             body {{
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                margin: 0;
-                padding: 0;
-                background-color: #f5f5f7;
-                color: #1d1d1f;
-            }}
-            .header {{
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            padding-top: 20px;
+        }}
+        .header-section {{
                 background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
                 color: white;
-                padding: 2rem;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            }}
-            .header h1 {{
-                margin: 0;
+            padding: 30px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }}
+        .stat-card {{
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            transition: transform 0.3s;
+        }}
+        .stat-card:hover {{
+            transform: translateY(-5px);
+            box-shadow: 0 8px 15px rgba(0,0,0,0.1);
+        }}
+        .stat-value {{
                 font-size: 2.5rem;
-                font-weight: 600;
-            }}
-            .container {{
-                max-width: 1400px;
-                margin: 0 auto;
-                padding: 2rem;
+            font-weight: bold;
+            color: #4a6cf7;
+        }}
+        .stat-label {{
+            color: #666;
+            font-size: 1rem;
+            margin-top: 5px;
             }}
             .chart-container {{
                 background: white;
-                padding: 1.5rem;
-                border-radius: 12px;
-                box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-                margin-bottom: 2rem;
-                height: 400px;
-                position: relative;
-            }}
-            .chart-grid {{
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
-                gap: 2rem;
-                margin-bottom: 2rem;
-            }}
-            .risk-card {{
-                background: white;
-                padding: 1.5rem;
-                border-radius: 12px;
-                box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-                border-left: 4px solid #667eea;
-            }}
-            .tech-badge {{
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }}
+        .finding-status-new {{
+            color: #28a745;
+        }}
+        .finding-status-changed {{
+            color: #fd7e14;
+        }}
+        .finding-status-existing {{
+            color: #6c757d;
+        }}
+        .technology-tag {{
                 display: inline-block;
-                padding: 0.25rem 0.75rem;
-                margin: 0.25rem;
+            background: #e9ecef;
+            color: #495057;
+            padding: 4px 10px;
                 border-radius: 20px;
-                font-size: 0.875rem;
-                background: #f3f4f6;
-                color: #374151;
-            }}
-            .secret-type {{
-                display: flex;
-                align-items: center;
-                padding: 0.5rem;
-                margin: 0.25rem 0;
-                background: #fef3c7;
-                border-radius: 8px;
-                font-size: 0.875rem;
-            }}
-            .cve-severity-critical {{
-                background: #fee2e2;
-                color: #991b1b;
-            }}
-            .cve-severity-high {{
-                background: #fed7aa;
-                color: #c2410c;
-            }}
-            .cve-severity-medium {{
-                background: #fef3c7;
-                color: #d97706;
-            }}
-            .cve-severity-low {{
-                background: #dbeafe;
-                color: #1e40af;
-            }}
-            .domain-section {{
-                background: white;
-                padding: 2rem;
-                border-radius: 12px;
-                margin-bottom: 2rem;
-                box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-            }}
-            .tech-stack-grid {{
-                display: grid;
-                grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-                gap: 1rem;
-                margin-top: 1rem;
-            }}
-            .tech-item {{
-                padding: 1rem;
-                background: #f9fafb;
-                border-radius: 8px;
-                border: 1px solid #e5e7eb;
-            }}
-            .cve-summary {{
-                display: grid;
-                grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-                gap: 1rem;
-                margin-top: 1rem;
-            }}
-            .cve-item {{
-                padding: 1rem;
-                border-radius: 8px;
-                border: 1px solid #e5e7eb;
-            }}
-            .cve-item h4 {{
-                margin-top: 0;
-                margin-bottom: 0.5rem;
-            }}
-            .cve-item.cve-severity-critical {{
-                background-color: #fee2e2;
-                border-left: 4px solid #ef4444;
-            }}
-            .cve-item.cve-severity-high {{
-                background-color: #fed7aa;
-                border-left: 4px solid #f97316;
-            }}
-            .cve-item.cve-severity-medium {{
-                background-color: #fef3c7;
-                border-left: 4px solid #f59e0b;
-            }}
-            .cve-item.cve-severity-low {{
-                background-color: #dbeafe;
-                border-left: 4px solid #3b82f6;
-            }}
-            .cve-list {{
-                margin-top: 0.5rem;
-                padding-left: 1.5rem;
-            }}
-            .cve-list li {{
-                margin-bottom: 0.25rem;
-            }}
-            .cve-list a {{
-                color: #4f46e5;
-                text-decoration: none;
-            }}
-            .cve-list a:hover {{
-                text-decoration: underline;
-            }}
-            .search-box {{
-                width: 100%;
-                padding: 1rem;
-                margin-bottom: 2rem;
-                border: 1px solid #e5e7eb;
-                border-radius: 8px;
-                font-size: 1rem;
-                background: white;
-            }}
-            .filter-bar {{
-                display: flex;
-                gap: 0.5rem;
-                margin-bottom: 2rem;
-                flex-wrap: wrap;
-            }}
-            .filter-btn {{
-                padding: 0.5rem 1rem;
-                background: #f3f4f6;
-                border: none;
-                border-radius: 6px;
-                font-size: 0.875rem;
-                font-weight: 500;
-                color: #4b5563;
-                cursor: pointer;
-                transition: all 0.2s;
-            }}
-            .filter-btn:hover {{
-                background: #e5e7eb;
-            }}
-            .filter-btn.active {{
-                background: #4f46e5;
+            margin: 3px;
+            font-size: 0.85rem;
+        }}
+        .vulnerability-critical {{
+            background: #dc3545;
+            color: white;
+        }}
+        .vulnerability-high {{
+            background: #fd7e14;
+            color: white;
+        }}
+        .vulnerability-medium {{
+            background: #ffc107;
+            color: #212529;
+        }}
+        .vulnerability-low {{
+            background: #6c757d;
                 color: white;
             }}
-            /* Remove risk meter styles */
+        .table-responsive {{
+            overflow-x: auto;
+        }}
         </style>
     </head>
     <body>
-        <div class="header">
-            <h1>🛡️ DirHunter AI Security Dashboard</h1>
-            <p class="subtitle">Enhanced Security Analysis Report - {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>
+    <div class="container">
+        <!-- Header Section -->
+        <div class="row">
+            <div class="col-12 header-section">
+                <h1><i class="fas fa-shield-alt"></i> Enhanced Security Dashboard</h1>
+                <p>Comprehensive overview of security findings, vulnerabilities and technologies</p>
+            </div>
         </div>
         
-        <div class="container">
-            <!-- Overview Cards -->
-            <div class="chart-grid">
-                <div class="risk-card">
-                    <h3>📊 Scan Overview</h3>
-                    <p>Total Domains: <strong>{total_domains}</strong></p>
-                    <p>Total Findings: <strong>{total_findings}</strong></p>
-                    <p>New Findings: <strong style="color: #ef4444">{global_status_counts.get('new', 0)}</strong></p>
-                    <p>Changed Findings: <strong style="color: #f59e0b">{global_status_counts.get('changed', 0)}</strong></p>
+        <!-- Summary Statistics -->
+        <div class="row">
+            <div class="col-md-3">
+                <div class="stat-card text-center">
+                    <div class="stat-value">{total_domains}</div>
+                    <div class="stat-label">Domains Scanned</div>
                 </div>
-                
-                <div class="risk-card">
-                    <h3>🔐 Security Summary</h3>
-                    <p>Unique Vulnerabilities: <strong>{len(global_vuln_ids)}</strong></p>
-                    <p>Total Secrets: <strong>{sum(global_secret_types.values())}</strong></p>
-                    <p>Critical Severity: <strong style="color: #ef4444">{global_cve_severity.get('Critical', 0)}</strong></p>
-                    <p>High Severity: <strong style="color: #f97316">{global_cve_severity.get('High', 0)}</strong></p>
-                    <p>Medium Severity: <strong style="color: #f59e0b">{global_cve_severity.get('Medium', 0)}</strong></p>
-                    <p>Low Severity: <strong style="color: #3b82f6">{global_cve_severity.get('Low', 0)}</strong></p>
+            </div>
+            <div class="col-md-3">
+                <div class="stat-card text-center">
+                    <div class="stat-value">{total_endpoints}</div>
+                    <div class="stat-label">Total Endpoints</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="stat-card text-center">
+                    <div class="stat-value finding-status-new">{finding_stats.get('new', 0)}</div>
+                    <div class="stat-label">New Findings</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="stat-card text-center">
+                    <div class="stat-value">{vuln_stats['total']}</div>
+                    <div class="stat-label">Vulnerabilities</div>
+                </div>
                 </div>
             </div>
             
-            <!-- Charts Section -->
-            <div class="chart-grid">
+        <!-- Technology Charts -->
+        <div class="row">
+            <div class="col-md-6">
                 <div class="chart-container">
-                    <canvas id="cveChart"></canvas>
+                    <h3>Top Technologies</h3>
+                    <canvas id="techChart"></canvas>
                 </div>
+            </div>
+            <div class="col-md-6">
                 <div class="chart-container">
-                    <canvas id="secretChart"></canvas>
+                    <h3>Technology Distribution</h3>
+                    <canvas id="techCategoryChart"></canvas>
                 </div>
             </div>
-            
-            <div class="chart-container" style="height: 300px;">
-                <canvas id="categoryChart"></canvas>
             </div>
-            
-            <!-- Search and Filters -->
-            <input type="text" class="search-box" id="searchInput" placeholder="Search domains...">
-            
-            <div class="filter-bar">
-                <button class="filter-btn active" data-filter="all">All Domains</button>
-                <button class="filter-btn" data-filter="new-findings">New Findings</button>
-                <button class="filter-btn" data-filter="with-vulns">With Vulnerabilities</button>
-                <button class="filter-btn" data-filter="with-secrets">With Secrets</button>
-                <button class="filter-btn" data-filter="with-downloads">With Downloads</button>
-            </div>
-    """
-    
-    # Add domain sections with enhanced details
-    for domain, domain_info in sorted(domain_data.items(), key=lambda x: x[0]): # Sort by domain name
-        # Calculate counts for filtering
-        new_findings = sum(1 for f in all_domains_data.get(domain, []) if f.get('finding_status') == 'new')
         
-        # Count unique vulnerability IDs
-        domain_vuln_ids = set()
-        for pkg_ids in domain_info['cve_summary'].values():
-            domain_vuln_ids.update(pkg_ids)
-        domain_vulns_count = len(domain_vuln_ids)
-        
-        domain_secrets_count = sum(domain_info['secret_types'].values()) if domain_info['secret_types'] else 0
-        
-        html += f"""
-            <div class="domain-section" 
-                 data-domain="{domain}"
-                 data-new-findings="{new_findings}"
-                 data-vulns="{domain_vulns_count}"
-                 data-secrets="{domain_secrets_count}"
-                 data-downloadable="{1 if domain_info['downloadable'] else 0}">
-                <h2>{domain}</h2>
-                
-                <h3>🔧 Technology Stack</h3>
-                <div class="tech-stack-grid">
-        """
-        
-        for tech_name, tech_info in domain_info['tech_stack'].items():
-            icon = TECH_LOGOS.get(tech_name.lower(), '📦')
-            versions = ', '.join(tech_info['versions']) if tech_info['versions'] else 'unknown'
-            cve_count = len(tech_info['cves'])
-            
-            cve_badge = ''
-            if cve_count > 0:
-                severity = severity_from_count(cve_count)
-                cve_badge = f'<span class="cve-severity-{severity.lower()}">{cve_count} CVEs</span>'
-            
-            html += f"""
-                <div class="tech-item">
-                    <h4>{icon} {tech_name}</h4>
-                    <p>Version: {versions}</p>
-                    {cve_badge}
+        <!-- Vulnerability Breakdown -->
+        <div class="row">
+            <div class="col-md-12">
+                <div class="chart-container">
+                    <h3>Vulnerability Severity Breakdown</h3>
+                    <div class="row align-items-center">
+                        <div class="col-md-6">
+                            <canvas id="vulnChart"></canvas>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="table-responsive">
+                                <table class="table table-bordered">
+                                    <thead>
+                                        <tr>
+                                            <th>Severity</th>
+                                            <th>Count</th>
+                                            <th>Percentage</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr class="table-danger">
+                                            <td>Critical</td>
+                                            <td>{vuln_stats['critical']}</td>
+                                            <td>{round(vuln_stats['critical'] / max(vuln_stats['total'], 1) * 100, 1)}%</td>
+                                        </tr>
+                                        <tr class="table-warning">
+                                            <td>High</td>
+                                            <td>{vuln_stats['high']}</td>
+                                            <td>{round(vuln_stats['high'] / max(vuln_stats['total'], 1) * 100, 1)}%</td>
+                                        </tr>
+                                        <tr class="table-info">
+                                            <td>Medium</td>
+                                            <td>{vuln_stats['medium']}</td>
+                                            <td>{round(vuln_stats['medium'] / max(vuln_stats['total'], 1) * 100, 1)}%</td>
+                                        </tr>
+                                        <tr class="table-secondary">
+                                            <td>Low</td>
+                                            <td>{vuln_stats['low']}</td>
+                                            <td>{round(vuln_stats['low'] / max(vuln_stats['total'], 1) * 100, 1)}%</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
                 </div>
-            """
-        
-        html += """
                 </div>
-        """
-        
-        # Add CVE summary if any
-        if domain_info['cve_summary']:
-            html += """
-                <h3>🩹 CVE Vulnerabilities</h3>
-                <div class="cve-summary">
-            """
-            
-            for pkg, cves in domain_info['cve_summary'].items():
-                cve_count = len(cves)
-                
-                # Determine severity based on individual vulnerabilities
-                severities = [get_vuln_severity(cve_id) for cve_id in cves]
-                # Use the most severe level (Critical > High > Medium > Low)
-                severity_rank = {"Critical": 4, "High": 3, "Medium": 2, "Low": 1}
-                highest_severity = max(severities, key=lambda s: severity_rank.get(s, 0))
-                severity_class = highest_severity.lower()
-                
-                html += f"""
-                    <div class="cve-item cve-severity-{severity_class}">
-                        <h4>{pkg}</h4>
-                        <p>Severity: <strong>{highest_severity}</strong> ({cve_count} vulnerabilities)</p>
-                        <ul class="cve-list">
-                """
-                
-                # Sort vulnerabilities by severity (highest first)
-                sorted_cves = sorted([(cve_id, get_vuln_severity(cve_id)) for cve_id in cves], 
-                                     key=lambda x: severity_rank.get(x[1], 0), 
-                                     reverse=True)
-                
-                # Show first 5 vulnerabilities
-                for cve_id, cve_severity in sorted_cves[:5]:
-                    severity_color = {
-                        "Critical": "#ef4444",
-                        "High": "#f97316", 
-                        "Medium": "#f59e0b", 
-                        "Low": "#3b82f6"
-                    }.get(cve_severity, "#6b7280")
-                    
-                    html += f"""
-                            <li>
-                                <a href="{'https://nvd.nist.gov/vuln/detail/' if cve_id.startswith('CVE') else 'https://github.com/advisories/'}{cve_id}" target="_blank">
-                                    {cve_id}
-                                </a>
-                                <span style="color: {severity_color}; font-size: 0.8em; margin-left: 5px;">({cve_severity})</span>
-                            </li>
-                    """
-                
-                if len(sorted_cves) > 5:
-                    html += f"""
-                            <li>... and {len(sorted_cves) - 5} more vulnerabilities</li>
-                    """
-                
-                html += """
-                        </ul>
                     </div>
-                """
-            
-            html += """
                 </div>
-            """
-        
-        # Add secrets summary if any
-        if domain_info['secret_types']:
-            html += """
-                <h3>🔑 Detected Secrets</h3>
-                <div>
-            """
-            for secret_type, count in domain_info['secret_types'].items():
-                secret_config = SECRET_TYPES.get(secret_type, {'icon': '🔓', 'risk': 'unknown'})
-                html += f"""
-                    <div class="secret-type">
-                        <span>{secret_config['icon']} {secret_type.replace('_', ' ').title()}: {count}</span>
-                        <span style="margin-left: auto; color: {'#ef4444' if secret_config['risk'] == 'critical' else '#f59e0b'}">
-                            {secret_config['risk'].upper()}
-                        </span>
                     </div>
-                """
-            html += """
                 </div>
-            """
         
-        # Add downloadable file information if available
-        if domain_info['downloadable']:
-            html += """
-                <h3>📁 Downloadable Files</h3>
-                <p>This domain contains downloadable files that were found during the scan.</p>
-                <p>Please refer to the detailed findings for specific file locations and content.</p>
-            """
-        
-        html += f"""
-                <p style="margin-top: 1rem;">
-                    <a href="{_slugify_name(domain)}_tags.html" style="color: #667eea;">View detailed findings →</a>
-                </p>
+        <!-- Links to other dashboards -->
+        <div class="row mb-4">
+            <div class="col-12 text-center">
+                <a href="../html/dashboard.html" class="btn btn-primary btn-lg">View Detailed Dashboard</a>
+                <a href="../html/summary.html" class="btn btn-outline-secondary btn-lg ms-3">View Summary Report</a>
             </div>
-        """
-    
-    # Add JavaScript for charts and filtering
-    html += f"""
+        </div>
+        
+        <footer class="text-center text-muted mt-5">
+            <p>Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        </footer>
         </div>
         
         <script>
-            // CVE Severity Chart
-            const cveCtx = document.getElementById('cveChart').getContext('2d');
-            new Chart(cveCtx, {{
-                type: 'doughnut',
-                data: {{
-                    labels: {json.dumps(severity_levels)},
-                    datasets: [{{
-                        data: {json.dumps([global_cve_severity[level] for level in severity_levels])},
-                        backgroundColor: ['#ef4444', '#f97316', '#f59e0b', '#3b82f6'],
-                        borderWidth: 0
-                    }}]
-                }},
-                options: {{
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {{
-                        title: {{
-                            display: true,
-                            text: 'CVE Severity Distribution'
-                        }}
-                    }}
-                }}
-            }});
-            
-            // Secret Types Chart
-            const secretCtx = document.getElementById('secretChart').getContext('2d');
-            new Chart(secretCtx, {{
+        document.addEventListener('DOMContentLoaded', function() {{
+            // Top Technologies Chart
+            const techCtx = document.getElementById('techChart').getContext('2d');
+            new Chart(techCtx, {{
                 type: 'bar',
                 data: {{
-                    labels: {json.dumps([k.replace('_', ' ').title() for k in global_secret_types.keys()])},
+                    labels: {json.dumps([name for name, _ in tech_stats['top']])},
                     datasets: [{{
-                        label: 'Count',
-                        data: {json.dumps(list(global_secret_types.values()))},
-                        backgroundColor: '#667eea'
+                        label: 'Occurrence Count',
+                        data: {json.dumps([count for _, count in tech_stats['top']])},
+                        backgroundColor: 'rgba(75, 192, 192, 0.6)',
+                        borderColor: 'rgba(75, 192, 192, 1)',
+                        borderWidth: 1
                     }}]
                 }},
                 options: {{
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {{
-                        title: {{
-                            display: true,
-                            text: 'Secret Types Found'
-                        }}
-                    }},
+                    indexAxis: 'y',
                     scales: {{
-                        y: {{
+                        x: {{
                             beginAtZero: true
                         }}
+                    }},
+                    plugins: {{
+                        legend: {{
+                            display: false
+                        }}
                     }}
                 }}
             }});
             
-            // Category Distribution Chart
-            const categoryCtx = document.getElementById('categoryChart').getContext('2d');
+            // Technology Categories Chart
+            const categoryCtx = document.getElementById('techCategoryChart').getContext('2d');
             new Chart(categoryCtx, {{
-                type: 'bar',
+                type: 'pie',
                 data: {{
-                    labels: {json.dumps(list(global_category_counts.keys()))},
+                    labels: {json.dumps(list(tech_stats['categories'].keys()))},
                     datasets: [{{
-                        label: 'Findings',
-                        data: {json.dumps(list(global_category_counts.values()))},
-                        backgroundColor: '#764ba2'
+                        data: {json.dumps(list(tech_stats['categories'].values()))},
+                        backgroundColor: [
+                            'rgba(255, 99, 132, 0.7)',
+                            'rgba(54, 162, 235, 0.7)',
+                            'rgba(255, 206, 86, 0.7)',
+                            'rgba(75, 192, 192, 0.7)',
+                            'rgba(153, 102, 255, 0.7)',
+                            'rgba(255, 159, 64, 0.7)',
+                            'rgba(199, 199, 199, 0.7)'
+                        ],
+                        borderWidth: 1
                     }}]
                 }},
                 options: {{
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    indexAxis: 'y',
                     plugins: {{
-                        title: {{
-                            display: true,
-                            text: 'Finding Categories'
+                        legend: {{
+                            position: 'right'
                         }}
                     }}
                 }}
             }});
             
-            // Domain filtering
-            (function() {{
-                const searchInput = document.getElementById('searchInput');
-                const domainSections = document.querySelectorAll('.domain-section');
-                const filterBtns = document.querySelectorAll('.filter-btn');
-                
-                let currentFilter = 'all';
-                
-                function applyFilters() {{
-                    const searchTerm = searchInput.value.toLowerCase();
-                    
-                    domainSections.forEach(section => {{
-                        const domain = section.dataset.domain.toLowerCase();
-                        let show = domain.includes(searchTerm);
-                        
-                        // Apply category filter
-                        if (show && currentFilter !== 'all') {{
-                            switch(currentFilter) {{
-                                case 'new-findings':
-                                    show = parseInt(section.dataset.newFindings) > 0;
-                                    break;
-                                case 'with-vulns':
-                                    show = parseInt(section.dataset.vulns) > 0;
-                                    break;
-                                case 'with-secrets':
-                                    show = parseInt(section.dataset.secrets) > 0;
-                                    break;
-                                case 'with-downloads':
-                                    show = parseInt(section.dataset.downloadable) > 0;
-                                    break;
-                            }}
+            // Vulnerability Severity Chart
+            const vulnCtx = document.getElementById('vulnChart').getContext('2d');
+            new Chart(vulnCtx, {{
+                type: 'doughnut',
+                data: {{
+                    labels: ['Critical', 'High', 'Medium', 'Low'],
+                    datasets: [{{
+                        data: [
+                            {vuln_stats['critical']}, 
+                            {vuln_stats['high']}, 
+                            {vuln_stats['medium']}, 
+                            {vuln_stats['low']}
+                        ],
+                        backgroundColor: [
+                            'rgba(220, 53, 69, 0.8)',
+                            'rgba(253, 126, 20, 0.8)',
+                            'rgba(255, 193, 7, 0.8)',
+                            'rgba(108, 117, 125, 0.8)'
+                        ],
+                        borderWidth: 1
+                    }}]
+                }},
+                options: {{
+                    plugins: {{
+                        legend: {{
+                            position: 'right'
                         }}
-                        
-                        section.style.display = show ? '' : 'none';
-                    }});
+                    }}
                 }}
-
-                searchInput.addEventListener('input', applyFilters);
-                filterBtns.forEach(btn => {{
-                    btn.addEventListener('click', () => {{
-                        filterBtns.forEach(b => b.classList.remove('active'));
-                        btn.classList.add('active');
-                        currentFilter = btn.dataset.filter;
-                        applyFilters();
                     }});
                 }});
-            }})();
         </script>
     </body>
-    </html>
-    """
-    
-    with open(dashboard_file, 'w', encoding='utf-8') as f:
-        f.write(html)
-    
-    print(f"[+] Enhanced dashboard created: {dashboard_file}")
-    return dashboard_file 
+</html>""")
+        
+        logger.info(f"Enhanced dashboard created: {dashboard_path}")
+        return dashboard_path
+        
+    except Exception as e:
+        logger.error(f"Failed to create enhanced dashboard: {e}")
+        
+        # Try to create a basic dashboard as fallback
+        try:
+            fallback_path = os.path.join(results_dir, "raw_dashboard.html")
+            with open(fallback_path, 'w') as f:
+                f.write(f"""<!DOCTYPE html>
+<html>
+<head><title>Basic Dashboard</title></head>
+<body>
+    <h1>Basic Dashboard (Enhanced dashboard creation failed)</h1>
+    <p>Error: {str(e)}</p>
+    <p>Domains scanned: {len(all_findings)}</p>
+    <p>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+    <a href="../html/dashboard.html">View Standard Dashboard</a>
+</body>
+</html>""")
+            logger.warning(f"Falling back to raw findings dashboard.")
+            return fallback_path
+        except Exception as fallback_error:
+            logger.warning(f"Basic dashboard creation failed: {fallback_error}")
+            return None 

@@ -2,7 +2,7 @@
 !.htaccess
 !.htpasswd
 %2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/etc/passwd
-%2e%2e//google.com
+%2e%2e/google.com
 %2e%2e;/test
 %3f/
 %C0%AE%C0%AE%C0%AF
@@ -2375,7 +2375,7 @@ admin/pma/
 admin/PMA/index.php
 admin/pma/index.php
 admin/pol_log.txt
-admin/portalcollect.php?f=http://xxx&t=js
+admin/portalcollect.php?f=http:/xxx&t=js
 admin/private/logs
 admin/release
 admin/scripts/fckeditor
@@ -3339,10 +3339,10 @@ awstats.conf
 awstats.pl
 awstats/
 axis
-axis//happyaxis.jsp
+axis/happyaxis.jsp
 axis1/axis1-admin/
-axis2-web//HappyAxis.jsp
-axis2//axis2-web/HappyAxis.jsp
+axis2-web/HappyAxis.jsp
+axis2/axis2-web/HappyAxis.jsp
 axis2/axis2-admin/
 azure-pipelines.yml
 azureadmin/
@@ -3829,7 +3829,7 @@ cimjobpostadmin
 circle.yml
 Citrix/
 citrix/
-Citrix//AccessPlatform/auth/clientscripts/cookies.js
+Citrix/AccessPlatform/auth/clientscripts/cookies.js
 citrix/AccessPlatform/auth/
 citrix/AccessPlatform/auth/clientscripts/
 Citrix/AccessPlatform/auth/clientscripts/login.js
@@ -4545,7 +4545,7 @@ docker-compose.yml
 docker/
 Dockerfile
 Dockerrun.aws.json
-docpicker/common_proxy/http/www.redbooks.ibm.com/Redbooks.nsf/RedbookAbstracts/sg247798.html?Logout&RedirectTo=http://example.com
+docpicker/common_proxy/http/www.redbooks.ibm.com/Redbooks.nsf/RedbookAbstracts/sg247798.html?Logout&RedirectTo=http:/example.com
 docpicker/internal_proxy/https/127.0.0.1:9043/ibm/console
 DocProject/buildhelp/
 DocProject/Help/html
@@ -4733,8 +4733,8 @@ engine
 engine.tar.gz
 engine.zip
 engine/
-engine/classes/swfupload//swfupload.swf
-engine/classes/swfupload//swfupload_f9.swf
+engine/classes/swfupload/swfupload.swf
+engine/classes/swfupload/swfupload_f9.swf
 engine/classes/swfupload/swfupload.swf
 engine/classes/swfupload/swfupload_f9.swf
 engine/log.txt
@@ -4885,7 +4885,7 @@ ext/modules/
 ext/run-tests.php
 extdirect
 extjs/
-extjs/resources//charts.swf
+extjs/resources/charts.swf
 extra_admin
 extras
 extras/documentation
@@ -5342,7 +5342,7 @@ html.zip
 html/
 html/cgi-bin/
 html/config.rb
-html/js/misc/swfupload//swfupload.swf
+html/js/misc/swfupload/swfupload.swf
 html/js/misc/swfupload/swfupload.swf
 html/js/misc/swfupload/swfupload_f9.swf
 html2pdf
@@ -7303,7 +7303,7 @@ plugins/
 plugins/editors/fckeditor
 plugins/fckeditor
 plugins/servlet/gadgets/makeRequest
-plugins/servlet/gadgets/makeRequest?url=https://google.com
+plugins/servlet/gadgets/makeRequest?url=https:/google.com
 plugins/servlet/oauth/users/icon
 plugins/sfSWFUploadPlugin/web/sfSWFUploadPlugin/swf/swfupload.swf
 plugins/sfSWFUploadPlugin/web/sfSWFUploadPlugin/swf/swfupload_f9.swf
@@ -7473,7 +7473,7 @@ providers.json
 proxy
 proxy.ini
 proxy.pac
-proxy.stream?origin=https://google.com
+proxy.stream?origin=https:/google.com
 proxy/
 PRTG/index.htm
 prtg/index.htm
@@ -7627,8 +7627,8 @@ relogin.php
 Remote-Access/
 Remote-Administrator/
 remote-entry/
-remote/fgt_lang?lang=/../../../../////////////////////////bin/sslvpnd
-remote/fgt_lang?lang=/../../../..//////////dev/cmdb/sslvpn_websession
+remote/fgt_lang?lang=/../../../../bin/sslvpnd
+remote/fgt_lang?lang=/../../../../dev/cmdb/sslvpn_websession
 remote/login
 remote_adm/
 Remote_Execution/
@@ -9087,7 +9087,7 @@ WarehouseWeb
 WarehouseWeb/
 WarehouseWebservlet
 WarehouseWebservlet/
-wavemaker/studioService.download?method=getContent&inUrl=file///etc/passwd
+wavemaker/studioService.download?method=getContent&inUrl=file/etc/passwd
 wc-logs
 wc.php
 wcx_ftp.ini
@@ -9501,13 +9501,13 @@ wp.zip
 wp/
 wp/wp-login.php
 wpad.dat
-wps/cmis_proxy/http/www.redbooks.ibm.com/Redbooks.nsf/RedbookAbstracts/sg247798.html?Logout&RedirectTo=http://example.com
-wps/common_proxy/http/www.redbooks.ibm.com/Redbooks.nsf/RedbookAbstracts/sg247798.html?Logout&RedirectTo=http://example.com
-wps/contenthandler/!ut/p/digest!8skKFbWr_TwcZcvoc9Dn3g/?uri=http://www.redbooks.ibm.com/Redbooks.nsf/RedbookAbstracts/sg247798.html?Logout&RedirectTo=http://example.com
-wps/myproxy/http/www.redbooks.ibm.com/Redbooks.nsf/RedbookAbstracts/sg247798.html?Logout&RedirectTo=http://example.com
+wps/cmis_proxy/http/www.redbooks.ibm.com/Redbooks.nsf/RedbookAbstracts/sg247798.html?Logout&RedirectTo=http:/example.com
+wps/common_proxy/http/www.redbooks.ibm.com/Redbooks.nsf/RedbookAbstracts/sg247798.html?Logout&RedirectTo=http:/example.com
+wps/contenthandler/!ut/p/digest!8skKFbWr_TwcZcvoc9Dn3g/?uri=http:/www.redbooks.ibm.com/Redbooks.nsf/RedbookAbstracts/sg247798.html?Logout&RedirectTo=http:/example.com
+wps/myproxy/http/www.redbooks.ibm.com/Redbooks.nsf/RedbookAbstracts/sg247798.html?Logout&RedirectTo=http:/example.com
 wps/PA_WCM_Authoring_UI/proxy/http/example.com
 wps/PA_WCM_Authoring_UI/proxy/https/example.com
-wps/proxy/http/www.redbooks.ibm.com/Redbooks.nsf/RedbookAbstracts/sg247798.html?Logout&RedirectTo=http://example.com
+wps/proxy/http/www.redbooks.ibm.com/Redbooks.nsf/RedbookAbstracts/sg247798.html?Logout&RedirectTo=http:/example.com
 ws.php
 WS_FTP
 ws_ftp.ini

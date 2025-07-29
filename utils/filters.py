@@ -7,6 +7,16 @@ from utils.db_handler import init_db, get_stored_hash, update_hash_record, track
 import re, urllib.parse
 import json
 
+# Import technology detection with fallback
+try:
+    from utils.fingerprint_manager import detect_technologies_for_url as detect_technology
+except ImportError:
+    # Fallback to direct import if manager is not available
+    try:
+        from utils.tech_fingerprint import fingerprint as detect_technology
+    except ImportError:
+        detect_technology = None
+
 # ssdeep may not be installed in all environments; fallback gracefully
 try:
     import ssdeep  # type: ignore
@@ -52,6 +62,66 @@ DOWNLOAD_CONTENT_TYPES = [
     "image/", "video/", "audio/", "font/", "application/vnd",
     "application/x-shockwave-flash", "application/x-msdownload"
 ]
+
+# Enhanced download detection patterns
+WELL_KNOWN_DOWNLOAD_PATTERNS = [
+    "apple-app-site-association",
+    "assetlinks.json",
+    "security.txt",
+    "robots.txt",
+    "sitemap.xml",
+    "manifest.json",
+    "service-worker.js",
+    "sw.js"
+]
+
+DOWNLOADABLE_EXTENSIONS = [
+    ".json", ".xml", ".txt", ".csv", ".yaml", ".yml", 
+    ".js", ".css", ".pdf", ".zip", ".tar.gz", ".rar"
+]
+
+def is_json_content(content_bytes):
+    """Detect if content is JSON regardless of content-type"""
+    try:
+        content = content_bytes.decode('utf-8', errors='ignore').strip()
+        return content.startswith('{') and content.endswith('}') and '"' in content
+    except:
+        return False
+
+def is_xml_content(content_bytes):
+    """Detect if content is XML regardless of content-type"""
+    try:
+        content = content_bytes.decode('utf-8', errors='ignore').strip()
+        return content.startswith('<?xml') or (content.startswith('<') and content.endswith('>'))
+    except:
+        return False
+
+def has_downloadable_extension(url):
+    """Check if URL has a downloadable file extension"""
+    return any(url.lower().endswith(ext) for ext in DOWNLOADABLE_EXTENSIONS)
+
+def is_well_known_config(url):
+    """Check if URL is a well-known configuration file"""
+    return any(pattern in url.lower() for pattern in WELL_KNOWN_DOWNLOAD_PATTERNS)
+
+def detect_content_mismatch(content_type, content_bytes):
+    """Detect when content-type doesn't match actual content"""
+    if not content_type:
+        return False
+    
+    # JSON served with wrong content-type
+    if content_type == "application/x-www-form-urlencoded" and is_json_content(content_bytes):
+        return True
+    
+    # XML served with wrong content-type  
+    if content_type == "text/plain" and is_xml_content(content_bytes):
+        return True
+    
+    # JSON served as text/plain
+    if content_type == "text/plain" and is_json_content(content_bytes):
+        return True
+    
+    return False
 
 # ─────────── LOGGING SETUP ───────────
 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
@@ -250,22 +320,38 @@ def curl_fetch_hash(url: str):
             if is_catch_all and (body_hash == catch_all_hash or full_size == catch_all_size):
                 is_soft404 = True
 
-        # Determine downloadability - fixed logic
+        # Enhanced downloadability detection
         import logging
         # ctype already defined above
         is_json = ctype and "json" in ctype
         
-        # Check if content type indicates download
+        # Enhanced download detection
         is_download_type = any(ct in ctype for ct in DOWNLOAD_CONTENT_TYPES)
+        is_content_mismatch = detect_content_mismatch(ctype, body_bytes)
+        is_well_known = is_well_known_config(url)
+        has_download_ext = has_downloadable_extension(url)
         
-        # Never treat HTML as download, regardless of size
+        # Enhanced download logic
         is_download = (
             is_download_type or
+            is_content_mismatch or
+            is_well_known or
+            has_download_ext or
             (ctype and not ctype.startswith("text") and "html" not in ctype and not is_json and full_size > DOWNLOAD_SIZE_THRESHOLD)
         )
 
         if is_download:
-            logging.info("[download] Detected potential downloadable: %s (ctype=%s, size=%d)", url, ctype, full_size)
+            reason = []
+            if is_download_type:
+                reason.append("content-type")
+            if is_content_mismatch:
+                reason.append("content-mismatch")
+            if is_well_known:
+                reason.append("well-known-config")
+            if has_download_ext:
+                reason.append("file-extension")
+            logging.info("[download] Detected potential downloadable: %s (ctype=%s, size=%d, reasons: %s)", 
+                        url, ctype, full_size, ", ".join(reason))
 
         download_meta = None
         if is_download:
@@ -278,10 +364,10 @@ def curl_fetch_hash(url: str):
         tech = None
         if len(body_bytes) < 500_000:  # Only analyse reasonably small pages
             try:
-                from utils.tech_fingerprint import fingerprint as _tfp
-                hdr_str = "\n".join(f"{k}: {v}" for k, v in resp.headers.items())
-                body_text = body_bytes.decode("utf-8", errors="ignore")
-                tech = _tfp(url, hdr_str, body_text)
+                if detect_technology:
+                    tech = detect_technology(url)
+                else:
+                    tech = None
 
                 # ⟶ CVE look-up for detected tech versions
                 if tech and (tech.get("version") or tech.get("wapp")):

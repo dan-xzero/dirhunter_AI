@@ -1,4 +1,5 @@
 import os, sys, traceback, logging, argparse
+import requests
 
 # Suppress MallocStackLogging warnings on macOS
 os.environ['MallocStackLogging'] = '0'
@@ -16,6 +17,7 @@ from utils.db_handler import reset_db, init_db, batch_track_findings
 from utils.tag_validator import validate_tagged_entry
 from utils.performance import PerformanceTracker
 from utils.dns_check import pre_scan_dns_check
+from utils.findings_enricher import enrich_findings
 from config import EXTENSIONS, THREADS, SCREENSHOT_DIR, RAW_RESULTS_DIR
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
@@ -25,6 +27,7 @@ import threading
 import time
 import socket
 from datetime import datetime
+import subprocess
 
 # Import resource manager if available
 try:
@@ -32,8 +35,94 @@ try:
 except ImportError:
     resource_manager = None
 
+from utils.fingerprint_manager import detect_technologies_for_url
+
+def capture_headers(url, timeout=10):
+    """
+    Capture response headers for a given URL
+    
+    Args:
+        url: URL to capture headers from
+        timeout: Request timeout in seconds
+        
+    Returns:
+        dict: Headers dictionary or empty dict if failed
+    """
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36'
+        }
+        
+        response = requests.head(url, headers=headers, timeout=timeout, allow_redirects=True)
+        
+        # Convert headers to a more readable format
+        captured_headers = {}
+        for header_name, header_value in response.headers.items():
+            # Skip some headers that are not security-relevant
+            if header_name.lower() not in ['server', 'date', 'connection', 'transfer-encoding']:
+                captured_headers[header_name] = header_value
+        
+        return captured_headers
+        
+    except Exception as e:
+        logger.debug(f"Failed to capture headers for {url}: {e}")
+        return {}
+
 load_dotenv(override=True)
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+
+# Add the aggressive_browser_cleanup function near the top after imports
+def aggressive_browser_cleanup():
+    """Aggressively clean up all browser processes"""
+    try:
+        logger.info("Performing aggressive browser cleanup...")
+        
+        # Force kill ALL Firefox and Chrome processes
+        subprocess.run(
+            "pkill -9 -f 'firefox|firefox-bin|chrome|chromium'", 
+            shell=True, stderr=subprocess.DEVNULL
+        )
+        
+        # Force kill ALL driver processes
+        subprocess.run(
+            "pkill -9 -f 'geckodriver|chromedriver'", 
+            shell=True, stderr=subprocess.DEVNULL
+        )
+        
+        # Force kill ALL Xvfb processes
+        subprocess.run(
+            "pkill -9 -f 'Xvfb'", 
+            shell=True, stderr=subprocess.DEVNULL
+        )
+        
+        # Kill any puppeteer processes that might be started by Wappalyzer
+        subprocess.run(
+            "pkill -9 -f 'puppeteer|node.*wappalyzer'", 
+            shell=True, stderr=subprocess.DEVNULL
+        )
+        
+        # Kill any remaining zombie processes
+        subprocess.run(
+            "pkill -9 -f 'zombie'", 
+            shell=True, stderr=subprocess.DEVNULL
+        )
+        
+        # Verify we got them all
+        count_cmd = "ps aux | grep -E 'firefox|chrome|chromium|gecko|selenium|xvfb|puppeteer' | grep -v grep | wc -l"
+        result = subprocess.run(count_cmd, shell=True, text=True, capture_output=True)
+        try:
+            remaining = int(result.stdout.strip())
+            if remaining > 0:
+                logger.warning(f"Browser cleanup detected {remaining} remaining processes")
+                
+                # Try again with more aggressive approach (lower priority processes)
+                subprocess.run("pkill -9 -f 'browser|webkit|electron'", shell=True, stderr=subprocess.DEVNULL)
+            else:
+                logger.info("All browser processes successfully terminated")
+        except Exception:
+            pass
+    except Exception as e:
+        logger.error(f"Error during aggressive browser cleanup: {e}")
 
 # ──────────── LOGGING SETUP ────────────
 logging.basicConfig(
@@ -59,7 +148,7 @@ def parse_args():
     parser.add_argument("--wordlist", type=str, help="Path to wordlist file")
     parser.add_argument("--ignore-hash", action="store_true", help="Show all findings including existing ones")
     parser.add_argument("--reset-db", action="store_true", help="Reset the hash database")
-    parser.add_argument("--screenshot-workers", type=int, default=1, help="[DEPRECATED] Screenshots are now taken sequentially")
+    parser.add_argument("--screenshot-workers", type=int, default=3, help="Number of parallel screenshot workers (default: 3)")
     parser.add_argument("--retry-rate-limits", action="store_true", help="Retry previously rate-limited paths")
     parser.add_argument("--parallel-domains", type=int, default=3, help="Number of domains to scan in parallel (default: 3)")
     parser.add_argument("--no-critical-alerts", action="store_true", help="Disable real-time critical alerts")
@@ -133,6 +222,9 @@ def process_domain_optimized(domain, wordlist, ignore_hash, screenshot_workers, 
     start_time = time.time()
     perf_metrics = {}
     
+    # Clean up any browser processes at the start of each domain
+    aggressive_browser_cleanup()
+    
     try:
         logger.info(f"[Process {os.getpid()}] Scanning: {domain}")
         os.makedirs(f"{RAW_RESULTS_DIR}/{domain}", exist_ok=True)
@@ -170,12 +262,22 @@ def process_domain_optimized(domain, wordlist, ignore_hash, screenshot_workers, 
         # Pre-filter to reduce screenshot workload
         unique_findings = filter_screenshot_tasks(filtered)
         
-        # Prepare screenshot tasks – skip direct downloads
+        # Prepare screenshot tasks
         screenshot_tasks = []
         screenshot_map = {}  # url -> screenshot path for duplicates
         
+        # Capture headers for all findings
+        logger.info(f"Capturing headers for {len(filtered)} findings...")
         for entry in filtered:
             entry["url"] = force_trailing_slash_if_needed(entry["url"], entry["status"])
+
+            # Capture headers for each finding
+            headers = capture_headers(entry["url"])
+            if headers:
+                entry["headers"] = headers
+                logger.info(f"Captured {len(headers)} headers for {entry['url']}")
+            else:
+                logger.info(f"No headers captured for {entry['url']}")
 
             # Direct download? – no screenshot / classification necessary
             if entry.get("downloadable"):
@@ -196,13 +298,12 @@ def process_domain_optimized(domain, wordlist, ignore_hash, screenshot_workers, 
                 screenshot_map[entry["url"]] = shot_path
                 
                 # Determine priority for this screenshot
-                # Priority only affects order, not screenshot method
                 priority = "normal"
                 path_lower = entry["path"].lower()
                 
                 # Higher priority for sensitive paths (processed first)
                 sensitive_terms = ['login', 'admin', 'dashboard', 'config', 'setup', 
-                                 'install', 'phpinfo', 'backup', '.git', '.env']
+                                  'install', 'phpinfo', 'backup', '.git', '.env']
                 if any(term in path_lower for term in sensitive_terms):
                     priority = "high"
                 
@@ -210,20 +311,13 @@ def process_domain_optimized(domain, wordlist, ignore_hash, screenshot_workers, 
                 if any(ext in path_lower for ext in ['.css', '.js', '.png', '.jpg', '.gif']):
                     priority = "low"
                 
-                # Always use full browser screenshots for all URLs
-                # Lightweight mode has been deprecated
+                # Add task as tuple for new format (url, path, priority)
+                screenshot_tasks.append((entry["url"], shot_path, priority))
                 
-                screenshot_tasks.append({
-                    "url": entry["url"],
-                    "output_path": shot_path,
-                    "screenshot_path": shot_path,
-                    "priority": priority
-                })
-
         # Initialize screenshot system before starting
         initialize_screenshot_system(max_workers=screenshot_workers)
         
-        # Take screenshots in parallel with priority ordering
+        # Take screenshots in parallel with the optimized method
         screenshot_start = time.time()
         take_screenshots_parallel(screenshot_tasks, max_workers=screenshot_workers)
         
@@ -273,6 +367,21 @@ def process_domain_optimized(domain, wordlist, ignore_hash, screenshot_workers, 
                 continue
             if not validate_tagged_entry(entry):
                 entry["ai_tag"] = "Other"
+
+        # Process headers for JSON serialization
+        for entry in filtered:
+            if 'headers' in entry:
+                # Ensure headers is a dict for proper JSON serialization
+                if not isinstance(entry['headers'], dict):
+                    entry['headers'] = dict(entry['headers'])
+                logger.info(f"Processed headers for {entry['url']}: {list(entry['headers'].keys())}")
+
+        # Enrich findings with additional data (including headers)
+        try:
+            enrich_findings(domain, filtered)
+            logger.info(f"Enriched {len(filtered)} findings for {domain}")
+        except Exception as e:
+            logger.error(f"Failed to enrich findings for {domain}: {e}")
 
         # Check for critical findings and send immediate alerts
         check_and_send_critical_alerts(domain, filtered, no_critical_alerts)
@@ -358,7 +467,7 @@ def process_domains_parallel(domains_with_wordlists, args, shared_results):
         # Process as they complete
         try:
             # Create initial dashboard early
-            dashboard_path = f"{RAW_RESULTS_DIR}/dashboard.html"
+            dashboard_path = os.path.join("results", "html", "dashboard.html")
             create_dashboard(shared_results.get_all(), dashboard_path)
             
             # Process completed domains
@@ -377,17 +486,12 @@ def process_domains_parallel(domains_with_wordlists, args, shared_results):
                     completed += 1
                     if completed % 3 == 0 or completed == total:
                         try:
-                            # Update main dashboard
+                            # Update main dashboard in HTML_REPORT_DIR
+                            dashboard_path = os.path.join("results", "html", "dashboard.html")
                             create_dashboard(shared_results.get_all(), dashboard_path)
                             
-                            # Try to update enhanced dashboard
-                            try:
-                                enhanced_dashboard_path = f"{RAW_RESULTS_DIR}/enhanced_dashboard.html"
-                                create_enhanced_dashboard(shared_results.get_all(), enhanced_dashboard_path)
-                            except Exception as e:
-                                logger.warning(f"Enhanced dashboard update failed: {e}")
                         except Exception as e:
-                            pass
+                            logger.warning(f"Dashboard update failed: {e}")
                             
                     logger.info(f"Progress: {completed}/{total} domains completed")
                 except Exception as e:
@@ -443,15 +547,25 @@ class BatchDatabaseWriter:
 
 # ──────────── MAIN ENTRY ────────────
 def main():
+    """Main entry point for DirHunter AI"""
+    # Aggressive cleanup at program start
+    aggressive_browser_cleanup()
+    
     # Cleanup old results before starting new scan
     try:
         from utils.cleanup import cleanup_old_runs
         cleanup_old_runs()
     except Exception as e:
         logger.warning(f"Cleanup failed: {e}")
-
+    
+    # Set environment variables to prevent browser usage in any Node.js/Puppeteer processes
+    os.environ["PUPPETEER_SKIP_CHROMIUM_DOWNLOAD"] = "true"
+    os.environ["WAPPALYZER_BROWSER"] = "false"
+    os.environ["NODE_OPTIONS"] = "--max-old-space-size=256"
+    
+    # Parse arguments
     args = parse_args()
-
+    
     # Start resource monitoring if available
     if resource_manager and not args.disable_resource_optimization:
         resource_manager.start_monitoring()
@@ -494,8 +608,9 @@ def main():
         domains_with_wordlists = [(domain, wordlist) for domain in domains]
     else:
         # Production vs Non-Production
-        from domains.prod_domains import PROD_DOMAINS
-        from domains.nonprod_domains import NONPROD_DOMAINS
+        # Load domains from text files
+        prod_domains = load_domains("domains/prod_domains.txt")
+        nonprod_domains = load_domains("domains/nonprod_domains.txt")
         
         # Skip DNS check for --retry-rate-limits
         if args.retry_rate_limits:
@@ -506,9 +621,9 @@ def main():
         else:
             # Default: scan prod domains with prod wordlist, nonprod with nonprod wordlist
             domains_with_wordlists = [
-                (domain, "wordlists/wordlist_prod.txt") for domain in PROD_DOMAINS
+                (domain, "wordlists/wordlist_prod.txt") for domain in prod_domains
             ] + [
-                (domain, "wordlists/wordlist_nonprod.txt") for domain in NONPROD_DOMAINS
+                (domain, "wordlists/wordlist_nonprod.txt") for domain in nonprod_domains
             ]
     
     # Validate domains with DNS lookup (skip for retry mode)
@@ -530,16 +645,18 @@ def main():
     try:
         # Create initial dashboard
         logger.info("Creating initial dashboard...")
-        dashboard_path = f"{RAW_RESULTS_DIR}/dashboard.html"
+        dashboard_path = os.path.join("results", "html", "dashboard.html")
         create_dashboard({}, dashboard_path)
         
         # Try to create enhanced dashboard
         try:
-            enhanced_dashboard_path = f"{RAW_RESULTS_DIR}/enhanced_dashboard.html"
+            enhanced_dashboard_path = os.path.join("results", "html", "enhanced_dashboard.html")
             logger.info("Creating initial enhanced dashboard...")
-            create_enhanced_dashboard({}, enhanced_dashboard_path)
+            create_enhanced_dashboard({}, "results/html")
+            logger.info(f"Dashboard updated: {enhanced_dashboard_path}")
         except Exception as e:
-            logger.warning(f"Initial enhanced dashboard creation failed: {e}")
+            logger.error(f"Failed to create enhanced dashboard: {e}")
+            logger.warning("Falling back to raw findings dashboard.")
             
         # Get server hostname for dashboard URL
         # Use REPORT_BASE_URL for dashboard URL
@@ -589,18 +706,10 @@ def main():
     
     # Create final dashboard
     try:
-        dashboard_path = f"{RAW_RESULTS_DIR}/dashboard.html"
+        dashboard_path = os.path.join("results", "html", "dashboard.html")
         create_dashboard(results, dashboard_path)
         logger.info(f"Final dashboard created: {dashboard_path}")
         
-        # Create enhanced dashboard
-        try:
-            enhanced_dashboard_path = f"{RAW_RESULTS_DIR}/enhanced_dashboard.html"
-            create_enhanced_dashboard(results, enhanced_dashboard_path)
-            logger.info(f"Enhanced dashboard created: {enhanced_dashboard_path}")
-        except Exception as e:
-            logger.warning(f"Enhanced dashboard creation failed: {e}")
-            
         # Add to run history
         try:
             from utils.run_history import update_run_history
@@ -621,12 +730,13 @@ def main():
             total_findings = sum(len(findings) for findings in results.values())
             new_findings = sum(sum(1 for f in fs if f.get('finding_status') == 'new') for fs in results.values())
             changed_findings = sum(sum(1 for f in fs if f.get('finding_status') == 'changed') for fs in results.values())
+            existing_findings = sum(sum(1 for f in fs if f.get('finding_status') == 'existing') for fs in results.values())
             scan_duration = time.time() - start_time
-            
+
             # Get high priority findings
             high_priority_findings = []
             from utils.ai_analyzer import get_category_priority
-            
+
             for domain, findings_list in results.items():
                 for finding in findings_list:
                     tag = finding.get('ai_tag', 'Unknown')
@@ -640,32 +750,34 @@ def main():
                             'status': finding.get('finding_status', 'unknown')
                         }
                         high_priority_findings.append(finding_entry)
-            
+
             # Sort by domain
             high_priority_findings.sort(key=lambda x: (x['domain'], x['tag'], x['url']))
-            
+
             # Generate domain stats
             domain_stats = []
             for domain, findings in results.items():
                 domain_new = sum(1 for f in findings if f.get('finding_status') == 'new')
                 domain_changed = sum(1 for f in findings if f.get('finding_status') == 'changed')
+                domain_existing = sum(1 for f in findings if f.get('finding_status') == 'existing')
                 domain_stats.append({
                     'domain': domain, 
                     'new': domain_new, 
                     'changed': domain_changed,
+                    'existing': domain_existing,
                     'total': len(findings)
                 })
-            
+
             # Count findings by category
             categories = defaultdict(int)
             for domain, findings_list in results.items():
                 for finding in findings_list:
                     tag = finding.get('ai_tag', 'Other')
                     categories[tag] += 1
-            
+
             # Sort categories by count
             sorted_categories = sorted(categories.items(), key=lambda x: x[1], reverse=True)[:5]
-            
+
             # Build Slack message
             completion_message = (
                 f":white_check_mark: *DirHunter AI Scan Completed*\n"
@@ -673,6 +785,7 @@ def main():
                 f"• Total findings: {total_findings}\n"
                 f"• New findings: {new_findings}\n"
                 f"• Changed findings: {changed_findings}\n"
+                f"• Existing findings: {existing_findings}\n"
                 f"• Scan duration: {scan_duration:.2f} seconds\n\n"
             )
             
