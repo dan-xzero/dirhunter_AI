@@ -581,7 +581,11 @@ def create_dashboard(results, output_path=None, is_update=False):
             # Create findings page for the domain
             export_domain_findings(domain, findings, os.path.dirname(output_path))
             export_tag_based_reports(domain, findings, os.path.dirname(output_path))
-                
+            
+            # Get safe filename for links
+            from main_optimized import safe_filename
+            safe_domain = safe_filename(domain)
+            
             # Count by status
             new_count = sum(1 for f in findings if f.get('finding_status') == 'new')
             changed_count = sum(1 for f in findings if f.get('finding_status') == 'changed')
@@ -648,7 +652,7 @@ def create_dashboard(results, output_path=None, is_update=False):
             f_handle.write(f"""
             <div class="card domain-card mb-4 domain-item">
                     <div class="card-body">
-                    <h3 class="domain-title"><a href="{domain}_findings.html">{domain}</a></h3>
+                    <h3 class="domain-title"><a href="{safe_domain}_findings.html">{domain}</a></h3>
                     <div class="endpoints-count">{len(findings)} endpoints</div>
                     
                     <div class="status-indicator">
@@ -706,11 +710,11 @@ def create_dashboard(results, output_path=None, is_update=False):
             # Add view technologies button with improved styling
             f_handle.write(f'''
             <div class="mt-3 mb-3">
-                <button class="btn btn-outline-primary btn-sm view-tech-btn" onclick="toggleDetails(this, 'tech-details-{domain}')">
+                <button class="btn btn-outline-primary btn-sm view-tech-btn" onclick="toggleDetails(this, 'tech-details-{safe_domain}')">
                     <i class="fas fa-chevron-right tech-chevron"></i> View technologies
                 </button>
                             </div>
-            <div id="tech-details-{domain}" class="tech-details">
+            <div id="tech-details-{safe_domain}" class="tech-details">
             ''')
             
             # Add tech details
@@ -741,10 +745,10 @@ def create_dashboard(results, output_path=None, is_update=False):
             # Add buttons for findings and tag findings
             f_handle.write(f'''
             <div class="mt-4 mb-3 domain-action-buttons">
-                <a href="{domain}_findings.html" class="btn btn-sm btn-primary me-2">
+                <a href="{safe_domain}_findings.html" class="btn btn-sm btn-primary me-2">
                     <i class="fas fa-search"></i> View Findings
                 </a>
-                <a href="{domain}_tags.html" class="btn btn-sm btn-secondary">
+                <a href="{safe_domain}_tags.html" class="btn btn-sm btn-secondary">
                     <i class="fas fa-tags"></i> View by Tags
                 </a>
                             </div>
@@ -820,7 +824,7 @@ def create_dashboard(results, output_path=None, is_update=False):
                 
                 for tag, count in sorted(tags.items(), key=lambda x: x[1], reverse=True)[:5]:
                     tag_id = slugify_tag(tag)
-                    f_handle.write(f'<a href="{domain}_tag_{tag_id}.html" class="tag-badge"><span class="tag-name">{tag}</span><span class="tag-count">{count}</span></a>')
+                    f_handle.write(f'<a href="{safe_domain}_tag_{tag_id}.html" class="tag-badge"><span class="tag-name">{tag}</span><span class="tag-count">{count}</span></a>')
                     
                 f_handle.write('</div></div>')
             
@@ -965,25 +969,46 @@ def create_dashboard(results, output_path=None, is_update=False):
             const domainFilter = document.getElementById('domain-filter');
             const statusFilter = document.getElementById('status-filter');
             const tagFilter = document.getElementById('tag-filter');
+            const techFilter = document.getElementById('tech-filter');
                 const resetFilters = document.getElementById('reset-filters');
                 const domainItems = document.querySelectorAll('.domain-item');
             
-            // Populate tag filter
-                const tags = {str(sorted(list(all_tags)))};
-                tags.forEach(tag => {{
-                const option = document.createElement('option');
+            // Populate tag filter dynamically from findings
+                const allTags = new Set();
+                domainItems.forEach(item => {{
+                    const tagLinks = item.querySelectorAll('.top-tags-container a');
+                    tagLinks.forEach(link => {{
+                        const tagName = link.querySelector('.tag-name');
+                        if (tagName) {{
+                            allTags.add(tagName.textContent);
+                        }}
+                    }});
+                }});
+                
+                allTags.forEach(tag => {{
+                    const option = document.createElement('option');
                     option.value = tag;
-                option.textContent = tag;
-                tagFilter.appendChild(option);
+                    option.textContent = tag;
+                    tagFilter.appendChild(option);
                 }});
             
-            // Populate tech filter
-                const techs = {str(sorted(list(all_techs)))};
-                techs.forEach(tech => {{
-                const option = document.createElement('option');
+            // Populate tech filter dynamically from findings
+                const allTechs = new Set();
+                domainItems.forEach(item => {{
+                    const techDetails = item.querySelectorAll('.tech-details .tech-item');
+                    techDetails.forEach(tech => {{
+                        const techName = tech.querySelector('span');
+                        if (techName) {{
+                            allTechs.add(techName.textContent);
+                        }}
+                    }});
+                }});
+                
+                allTechs.forEach(tech => {{
+                    const option = document.createElement('option');
                     option.value = tech;
-                option.textContent = tech;
-                techFilter.appendChild(option);
+                    option.textContent = tech;
+                    techFilter.appendChild(option);
                 }});
                 
                 function applyFilters() {{
@@ -993,7 +1018,8 @@ def create_dashboard(results, output_path=None, is_update=False):
                 const techValue = techFilter.value;
                     
                     domainItems.forEach(item => {{
-                        const domain = item.querySelector('.domain-title').textContent.toLowerCase();
+                        const domainElement = item.querySelector('.domain-title a');
+                        const domain = domainElement ? domainElement.textContent.toLowerCase() : '';
                         
                         // Basic domain text filter
                         const matchesDomain = domain.includes(domainText);
@@ -1007,15 +1033,20 @@ def create_dashboard(results, output_path=None, is_update=False):
                         // Status filter
                     let matchesStatus = true;
                         if (statusValue !== 'all') {{
-                            const statusCount = parseInt(item.querySelector(`.status-${{statusValue}}`).textContent);
-                            matchesStatus = statusCount > 0;
+                            const statusElement = item.querySelector('.status-' + statusValue);
+                            if (statusElement) {{
+                                const statusCount = parseInt(statusElement.textContent);
+                                matchesStatus = statusCount > 0;
+                            }} else {{
+                                matchesStatus = false;
+                            }}
                         }}
                         
                         // Tag filter
                     let matchesTag = true;
                         if (tagValue !== 'all') {{
                             // Check if any tag badges contain the selected tag
-                            const tagLinks = item.querySelectorAll('.top-tags a');
+                            const tagLinks = item.querySelectorAll('.top-tags-container a');
                             matchesTag = Array.from(tagLinks).some(link => 
                                 link.textContent.toLowerCase().includes(tagValue.toLowerCase())
                             );
@@ -1025,7 +1056,7 @@ def create_dashboard(results, output_path=None, is_update=False):
                     let matchesTech = true;
                         if (techValue !== 'all') {{
                             // Check if tech details contain the selected tech
-                            const techDetails = item.querySelectorAll('.tech-item');
+                            const techDetails = item.querySelectorAll('.tech-details .tech-item');
                             matchesTech = Array.from(techDetails).some(tech => 
                                 tech.textContent.toLowerCase().includes(techValue.toLowerCase())
                             );
@@ -1593,6 +1624,11 @@ def make_enhanced_subpage_for_tag(domain, tag, items, subpage_name, output_dir, 
                     </select>
                 </div>
                 <div class="filter-item">
+                    <select class="form-select" id="tagFilter">
+                        <option value="all">All Tags</option>
+                    </select>
+                </div>
+                <div class="filter-item">
                     <button class="btn btn-primary w-100" id="resetFilters">Reset Filters</button>
                 </div>
             </div>
@@ -1719,7 +1755,7 @@ def make_enhanced_subpage_for_tag(domain, tag, items, subpage_name, output_dir, 
                                 <th>Version</th>
                                 <th>CVE IDs</th>
                                 <th>Severity</th>
-                            </tr>
+                </tr>
                         </thead>
                         <tbody>""")
         
@@ -1853,7 +1889,7 @@ def make_enhanced_subpage_for_tag(domain, tag, items, subpage_name, output_dir, 
             
             # Write the finding card
             f.write(f"""
-            <div class="card mb-4 finding-card" data-status="{finding_status}">
+            <div class="card mb-4 finding-card" data-status="{finding_status}" data-tag="{item.get('ai_tag', 'Other')}">
                 <div class="card-header d-flex justify-content-between align-items-center">
                     <h5><a href="{url}" target="_blank">{display_path}</a></h5>
                     <span class="badge {status_class} status-badge">{status_text}</span>
@@ -1893,16 +1929,34 @@ def make_enhanced_subpage_for_tag(domain, tag, items, subpage_name, output_dir, 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
     
     <script>
-        document.addEventListener('DOMContentLoaded', function() {
+        // Search and filter functionality
+    document.addEventListener('DOMContentLoaded', function() {
             const searchInput = document.getElementById('searchInput');
             const statusFilter = document.getElementById('statusFilter');
             const tagFilter = document.getElementById('tagFilter');
             const resetButton = document.getElementById('resetFilters');
             const findingCards = document.querySelectorAll('.finding-card');
             
-            function applyFilters() {
+            // Populate tag filter with available tags
+            const availableTags = new Set();
+            findingCards.forEach(card => {
+                const cardTag = card.dataset.tag;
+                if (cardTag) {
+                    availableTags.add(cardTag);
+                }
+            });
+            
+            // Add tag options to the filter
+            availableTags.forEach(tag => {
+                const option = document.createElement('option');
+                option.value = tag;
+                option.textContent = tag;
+                tagFilter.appendChild(option);
+            });
+        
+        function applyFilters() {
                 const searchTerm = searchInput.value.toLowerCase();
-                const statusValue = statusFilter.value;
+            const statusValue = statusFilter.value;
                 const tagValue = tagFilter.value;
                 
                 findingCards.forEach(card => {
@@ -1919,7 +1973,7 @@ def make_enhanced_subpage_for_tag(domain, tag, items, subpage_name, output_dir, 
             }
             
             searchInput.addEventListener('input', applyFilters);
-            statusFilter.addEventListener('change', applyFilters);
+        statusFilter.addEventListener('change', applyFilters);
             tagFilter.addEventListener('change', applyFilters);
             
             resetButton.addEventListener('click', function() {
@@ -1928,10 +1982,10 @@ def make_enhanced_subpage_for_tag(domain, tag, items, subpage_name, output_dir, 
                 tagFilter.value = 'all';
                 applyFilters();
             });
-        });
+    });
     </script>
-    </body>
-    </html>
+</body>
+</html>
 """)
     
     logger.info(f"[+] Created enhanced subpage: {subpage_name} for tag={tag}")
@@ -2170,7 +2224,11 @@ def export_domain_findings(domain, findings, output_dir=None):
         output_dir = "results/html"
     
     os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, f"{domain}_findings.html")
+    
+    # Handle domains with paths by creating a safe filename
+    from main_optimized import safe_filename
+    safe_domain = safe_filename(domain)
+    output_path = os.path.join(output_dir, f"{safe_domain}_findings.html")
     
     # Sort findings - new first, then changed, then existing
     findings_sorted = sorted(findings, key=lambda x: {
@@ -2393,6 +2451,11 @@ def export_domain_findings(domain, findings, output_dir=None):
                     <option value="changed">Changed</option>
                     <option value="existing">Existing</option>
                 </select>
+                </div>
+                <div class="filter-item">
+                    <select class="form-select" id="tagFilter">
+                        <option value="all">All Tags</option>
+                    </select>
                 </div>
                 <div class="filter-item">
                     <button class="btn btn-primary w-100" id="resetFilters">Reset Filters</button>
@@ -2709,6 +2772,23 @@ def export_domain_findings(domain, findings, output_dir=None):
             const tagFilter = document.getElementById('tagFilter');
             const resetButton = document.getElementById('resetFilters');
             const findingCards = document.querySelectorAll('.finding-card');
+            
+            // Populate tag filter with available tags
+            const availableTags = new Set();
+            findingCards.forEach(card => {
+                const cardTag = card.dataset.tag;
+                if (cardTag) {
+                    availableTags.add(cardTag);
+                }
+            });
+            
+            // Add tag options to the filter
+            availableTags.forEach(tag => {
+                const option = document.createElement('option');
+                option.value = tag;
+                option.textContent = tag;
+                tagFilter.appendChild(option);
+            });
         
         function applyFilters() {
                 const searchTerm = searchInput.value.toLowerCase();

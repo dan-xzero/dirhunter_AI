@@ -95,7 +95,10 @@ def save_enriched_findings(domain, findings, output_dir=None):
     os.makedirs(output_dir, exist_ok=True)
     
     try:
-        filename = os.path.join(output_dir, f"{domain}_enriched.json")
+        # Use safe filename for domain to handle paths
+        from main_optimized import safe_filename
+        safe_domain = safe_filename(domain)
+        filename = os.path.join(output_dir, f"{safe_domain}_enriched.json")
         if findings and isinstance(findings, list):
             logger.info(f"First finding keys before save: {list(findings[0].keys())}")
         with open(filename, 'w') as f:

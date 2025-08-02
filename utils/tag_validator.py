@@ -9,7 +9,7 @@ TAG_RULES = {
     },
     "Login Panel": {
         "must_contain": ["login", "signin", "auth"],
-        "must_not_contain": ["api", "docs"],
+        "must_not_contain": ["api-doc", "apidocs", "swagger", "docs"],
         "min_status": 200,
         "max_status": 403
     },

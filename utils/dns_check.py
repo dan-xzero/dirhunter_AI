@@ -11,11 +11,17 @@ logger = logging.getLogger(__name__)
 
 def extract_hostname(url: str) -> str:
     """Extract hostname from URL or domain string"""
-    if not url.startswith(('http://', 'https://')):
-        return url
+    # If it starts with http:// or https://, parse it as a URL
+    if url.startswith(('http://', 'https://')):
+        parsed = urlparse(url)
+        return parsed.hostname or parsed.netloc or url
     
-    parsed = urlparse(url)
-    return parsed.hostname or parsed.netloc or url
+    # If it doesn't start with protocol but contains a path, extract just the hostname
+    if '/' in url:
+        return url.split('/')[0]
+    
+    # Otherwise, return the domain as is
+    return url
 
 def check_dns(domain: str) -> bool:
     """Check if domain resolves via DNS"""
