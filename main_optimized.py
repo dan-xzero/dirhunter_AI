@@ -723,57 +723,60 @@ def main():
     db_writer.flush()
     
     # Send Slack summary (if webhook is set)
-    if WEBHOOK_URL and results:
+    if WEBHOOK_URL:
         try:
             # Calculate key statistics
-            total_domains = len(results)
-            total_findings = sum(len(findings) for findings in results.values())
-            new_findings = sum(sum(1 for f in fs if f.get('finding_status') == 'new') for fs in results.values())
-            changed_findings = sum(sum(1 for f in fs if f.get('finding_status') == 'changed') for fs in results.values())
-            existing_findings = sum(sum(1 for f in fs if f.get('finding_status') == 'existing') for fs in results.values())
+            total_domains = len(results) if results else 0
+            total_findings = sum(len(findings) for findings in results.values()) if results else 0
+            new_findings = sum(sum(1 for f in fs if f.get('finding_status') == 'new') for fs in results.values()) if results else 0
+            changed_findings = sum(sum(1 for f in fs if f.get('finding_status') == 'changed') for fs in results.values()) if results else 0
+            existing_findings = sum(sum(1 for f in fs if f.get('finding_status') == 'existing') for fs in results.values()) if results else 0
             scan_duration = time.time() - start_time
 
             # Get high priority findings
             high_priority_findings = []
             from utils.ai_analyzer import get_category_priority
 
-            for domain, findings_list in results.items():
-                for finding in findings_list:
-                    tag = finding.get('ai_tag', 'Unknown')
-                    priority = get_category_priority(tag)
-                    if priority >= 8:  # High priority
-                        finding_entry = {
-                            'domain': domain,
-                            'url': finding.get('url', ''),
-                            'path': finding.get('path', ''),
-                            'tag': tag,
-                            'status': finding.get('finding_status', 'unknown')
-                        }
-                        high_priority_findings.append(finding_entry)
+            if results:
+                for domain, findings_list in results.items():
+                    for finding in findings_list:
+                        tag = finding.get('ai_tag', 'Unknown')
+                        priority = get_category_priority(tag)
+                        if priority >= 8:  # High priority
+                            finding_entry = {
+                                'domain': domain,
+                                'url': finding.get('url', ''),
+                                'path': finding.get('path', ''),
+                                'tag': tag,
+                                'status': finding.get('finding_status', 'unknown')
+                            }
+                            high_priority_findings.append(finding_entry)
 
             # Sort by domain
             high_priority_findings.sort(key=lambda x: (x['domain'], x['tag'], x['url']))
 
             # Generate domain stats
             domain_stats = []
-            for domain, findings in results.items():
-                domain_new = sum(1 for f in findings if f.get('finding_status') == 'new')
-                domain_changed = sum(1 for f in findings if f.get('finding_status') == 'changed')
-                domain_existing = sum(1 for f in findings if f.get('finding_status') == 'existing')
-                domain_stats.append({
-                    'domain': domain, 
-                    'new': domain_new, 
-                    'changed': domain_changed,
-                    'existing': domain_existing,
-                    'total': len(findings)
-                })
+            if results:
+                for domain, findings in results.items():
+                    domain_new = sum(1 for f in findings if f.get('finding_status') == 'new')
+                    domain_changed = sum(1 for f in findings if f.get('finding_status') == 'changed')
+                    domain_existing = sum(1 for f in findings if f.get('finding_status') == 'existing')
+                    domain_stats.append({
+                        'domain': domain, 
+                        'new': domain_new, 
+                        'changed': domain_changed,
+                        'existing': domain_existing,
+                        'total': len(findings)
+                    })
 
             # Count findings by category
             categories = defaultdict(int)
-            for domain, findings_list in results.items():
-                for finding in findings_list:
-                    tag = finding.get('ai_tag', 'Other')
-                    categories[tag] += 1
+            if results:
+                for domain, findings_list in results.items():
+                    for finding in findings_list:
+                        tag = finding.get('ai_tag', 'Other')
+                        categories[tag] += 1
 
             # Sort categories by count
             sorted_categories = sorted(categories.items(), key=lambda x: x[1], reverse=True)[:5]
@@ -850,7 +853,7 @@ def main():
             
             # Send the message
             from utils.slack_alert import send_simple_slack_message
-            send_simple_slack_message(
+            success = send_simple_slack_message(
                 WEBHOOK_URL,
                 "DirHunter AI Scan Completed",
                 completion_message,
@@ -858,12 +861,43 @@ def main():
                 "View Dashboard"
             )
             
+            if success:
+                logger.info("✅ Slack completion message sent successfully")
+            else:
+                logger.error("❌ Failed to send Slack completion message")
+            
         except Exception as e:
-            logger.warning(f"Slack alert failed: {e}")
+            logger.error(f"❌ Slack alert failed with exception: {e}")
+            import traceback
+            logger.error(f"❌ Exception details: {traceback.format_exc()}")
     elif not WEBHOOK_URL:
         logger.warning("WEBHOOK_URL not set. Skipping Slack alert.")
     elif not results:
-        logger.warning("No results found across all domains.")
+        logger.info("No results found across all domains. Sending completion notification anyway.")
+        # Send a simple completion message even when no results
+        try:
+            from utils.slack_alert import send_simple_slack_message
+            completion_message = (
+                f":white_check_mark: *DirHunter AI Scan Completed*\n"
+                f"Scan completed but no findings were detected.\n"
+                f"• Scan duration: {time.time() - start_time:.2f} seconds\n"
+                f"• Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
+                f"• :robot_face: Powered by DirHunter AI"
+            )
+            
+            success = send_simple_slack_message(
+                WEBHOOK_URL,
+                "DirHunter AI Scan Completed",
+                completion_message
+            )
+            
+            if success:
+                logger.info("✅ Slack completion message sent successfully (no results)")
+            else:
+                logger.error("❌ Failed to send Slack completion message (no results)")
+                
+        except Exception as e:
+            logger.error(f"❌ Slack alert failed for no-results case: {e}")
     
     # Show performance report if requested
     if args.performance_report:

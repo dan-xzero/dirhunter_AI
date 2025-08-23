@@ -534,14 +534,38 @@ def send_simple_slack_message(webhook_url, title, message, link=None, link_text=
             ]
         })
     
+    # Check message size (Slack has a 3000 character limit for text blocks)
+    total_text_length = sum(len(block.get("text", {}).get("text", "")) for block in blocks if block.get("type") == "section")
+    
+    if total_text_length > 2500:  # Leave some buffer
+        print(f"[!] Warning: Message is very large ({total_text_length} chars). Truncating...")
+        # Truncate the last text block if it's too long
+        for i in range(len(blocks) - 1, -1, -1):
+            if blocks[i].get("type") == "section" and blocks[i].get("text", {}).get("text"):
+                current_text = blocks[i]["text"]["text"]
+                if len(current_text) > 500:
+                    blocks[i]["text"]["text"] = current_text[:500] + "\n\n... (message truncated due to size limits)"
+                    break
+    
     payload = {
         "blocks": blocks,
         "text": title  # Fallback text
     }
     
     try:
-        response = requests.post(webhook_url, json=payload)
-        return response.status_code == 200
+        response = requests.post(webhook_url, json=payload, timeout=30)
+        if response.status_code == 200:
+            print(f"[+] Slack message sent successfully")
+            return True
+        else:
+            print(f"[!] Slack message failed with status {response.status_code}: {response.text}")
+            return False
+    except requests.exceptions.Timeout:
+        print(f"[!] Slack message timeout after 30 seconds")
+        return False
+    except requests.exceptions.RequestException as e:
+        print(f"[!] Network error sending Slack message: {e}")
+        return False
     except Exception as e:
-        print(f"Error sending Slack message: {e}")
+        print(f"[!] Unexpected error sending Slack message: {e}")
         return False
