@@ -50,7 +50,9 @@ def check_with_http_https(domain: str) -> bool:
     for url in urls_to_try:
         try:
             logger.info(f"Trying to connect to {url}")
-            response = requests.head(url, timeout=10, allow_redirects=True)
+            from utils.user_agent_manager import get_realistic_headers
+            headers = get_realistic_headers(include_scanner_header=True)
+            response = requests.head(url, headers=headers, timeout=10, allow_redirects=True)
             if response.status_code < 400:
                 logger.info(f"Successfully connected to {url} (Status: {response.status_code})")
                 return True

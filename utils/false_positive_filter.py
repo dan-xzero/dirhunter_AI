@@ -247,11 +247,7 @@ def filter_false_positives(detected_techs: Dict[str, Any]) -> Dict[str, Any]:
             not check_false_positives(tech_name, tech_info, tech_names))
     }
     
-    # Add back metadata
-    if 'cve_vulns' in detected_techs:
-        filtered_techs['cve_vulns'] = detected_techs['cve_vulns']
-    if 'cve_details' in detected_techs:
-        filtered_techs['cve_details'] = detected_techs['cve_details']
+
     
     # Log filtering results
     original_count = len(tech_names)
@@ -260,4 +256,82 @@ def filter_false_positives(detected_techs: Dict[str, Any]) -> Dict[str, Any]:
     if original_count > filtered_count:
         logger.info(f"Removed {original_count - filtered_count} likely false positives")
     
-    return filtered_techs 
+    return filtered_techs
+
+
+def apply_false_positive_filter(entry: Dict[str, Any], existing_findings: List[Dict[str, Any]]) -> bool:
+    """
+    Apply dynamic false positive filtering to a single finding entry
+    
+    Args:
+        entry: The finding entry to check
+        existing_findings: List of already accepted findings
+        
+    Returns:
+        True if the entry should be kept, False if it should be filtered out
+    """
+    url = entry.get("url", "")
+    length = entry.get("length", 0)
+    status = entry.get("status", 0)
+    
+    # Skip if status is not 200
+    if status != 200:
+        return False
+    
+    # Dynamic length-based filtering
+    if existing_findings:
+        # Calculate length frequency distribution
+        length_freq = {}
+        for finding in existing_findings:
+            finding_length = finding.get("length", 0)
+            length_freq[finding_length] = length_freq.get(finding_length, 0) + 1
+        
+        # Find the most common length and its frequency
+        if length_freq:
+            most_common_length = max(length_freq.keys(), key=lambda k: length_freq[k])
+            most_common_freq = length_freq[most_common_length]
+            total_findings = len(existing_findings)
+            
+            # If current length is close to the most common length and we already have many similar
+            if abs(length - most_common_length) <= 5:
+                # Calculate threshold based on total findings (adaptive)
+                # More findings = higher threshold to avoid over-filtering
+                threshold = min(max(3, total_findings // 10), 8)  # Between 3 and 8
+                
+                if most_common_freq >= threshold:
+                    logger.debug(f"Filtering out {url} - too many similar findings with length {length} (threshold: {threshold})")
+                    return False
+    
+    # Dynamic API endpoint filtering
+    api_endpoints = [f for f in existing_findings if "/api/" in f.get("url", "")]
+    if api_endpoints:
+        # Calculate API endpoint threshold based on total findings
+        api_threshold = min(max(5, len(existing_findings) // 8), 15)  # Between 5 and 15
+        
+        if len(api_endpoints) >= api_threshold:
+            # Check if current URL matches common API patterns
+            api_patterns = [
+                r"/api/.*/health$",
+                r"/api/.*/status$",
+                r"/api/.*/ping$",
+                r"/api/.*/healthz$",
+                r"/api/.*/ready$",
+                r"/api/.*/live$"
+            ]
+            
+            for pattern in api_patterns:
+                if re.search(pattern, url, re.IGNORECASE):
+                    logger.debug(f"Filtering out {url} - too many API endpoints (threshold: {api_threshold})")
+                    return False
+    
+    # Content similarity filtering (always active)
+    body_hash = entry.get("body_hash", "")
+    if body_hash:
+        duplicate_hashes = [f for f in existing_findings 
+                           if f.get("body_hash") == body_hash]
+        
+        if duplicate_hashes:
+            logger.debug(f"Filtering out {url} - duplicate content hash")
+            return False
+    
+    return True 

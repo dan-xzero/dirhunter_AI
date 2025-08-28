@@ -10,7 +10,7 @@ from datetime import datetime
 from collections import defaultdict
 import requests
 from functools import lru_cache
-from utils.tech_helpers import extract_tech_and_cves, aggregate_cves, severity_from_count
+
 import re
 from collections import Counter
 
@@ -19,27 +19,7 @@ logger = logging.getLogger(__name__)
 
 HTML_REPORT_DIR = "results/html"
 
-# ------------------------------------------------------------
-# Helper for CVE descriptions (OSV.dev) – cached in-memory so repeated
-# look-ups are fast. We only fetch when building HTML and will silently
-# ignore network failures.
-# ------------------------------------------------------------
 
-
-@lru_cache(maxsize=2048)
-def _fetch_cve_summary(cve_id: str) -> str:
-    """Return short summary/description for the given CVE/GHSA id."""
-    if not cve_id:
-        return ""
-    url = f"https://api.osv.dev/v1/vuln/{cve_id}"
-    try:
-        resp = requests.get(url, timeout=6)
-        if resp.status_code == 200:
-            data = resp.json()
-            return data.get("summary") or (data.get("details") or "")[:200]
-    except Exception:
-        pass
-    return ""
 
 def _slugify_name(value: str) -> str:
     """Return a filesystem- and URL-safe slug for arbitrary strings (domains, tags, etc.)."""
@@ -51,61 +31,9 @@ def _slugify_name(value: str) -> str:
     value = re.sub(r"_+", "_", value).strip("_")
     return value or "item"
 
-def categorize_technology(tech_name):
-    """Categorize technology into categories"""
-    tech_name = tech_name.lower()
-    
-    # Frontend technologies
-    if any(x in tech_name for x in ['vue', 'react', 'angular', 'jquery', 'bootstrap', 'tailwind', 
-                                    'css', 'font', 'style', 'ui', 'ux', 'frontend', 'html', 
-                                    'javascript', 'js', 'typescript', 'ts']):
-        return "Frontend"
-    
-    # Backend technologies
-    if any(x in tech_name for x in ['node', 'express', 'django', 'flask', 'laravel', 'rails', 
-                                   'php', 'ruby', 'python', '.net', 'java', 'spring', 'backend']):
-        return "Backend"
-        
-    # Server technologies
-    if any(x in tech_name for x in ['nginx', 'apache', 'iis', 'server', 'tomcat', 'jetty', 'litespeed']):
-        return "Server"
-        
-    # Cloud services
-    if any(x in tech_name for x in ['aws', 'amazon', 'azure', 'cloud', 'gcp', 'google cloud', 'cdn', 
-                                   'cloudflare', 'fastly', 'akamai', 's3', 'lambda', 'ec2', 'cloudfront']):
-        return "Cloud/CDN"
-        
-    # Analytics and marketing
-    if any(x in tech_name for x in ['google analytics', 'gtm', 'tag manager', 'pixel', 'analytics', 'tracking', 
-                                   'facebook pixel', 'marketing']):
-        return "Analytics"
-        
-    # Security
-    if any(x in tech_name for x in ['security', 'authentication', 'auth', 'waf', 'firewall', 'protection',
-                                   'hsts', 'ssl', 'tls', 'https', 'secure']):
-        return "Security"
-    
-    return "Other"
 
-def get_vuln_severity(cve_id):
-    """Determine vulnerability severity based on CVE ID or pattern"""
-    # This is a simplified version - normally you'd look this up in a database
-    # For now we'll use a deterministic but pseudo-random approach
-    
-    # Get a hash of the CVE ID to make it deterministic
-    cve_hash = int(hashlib.md5(cve_id.encode()).hexdigest(), 16)
-    
-    # Use the hash to determine severity
-    value = cve_hash % 100
-    
-    if value < 10:
-        return "critical"
-    elif value < 30:
-        return "high"
-    elif value < 70:
-        return "medium"
-    else:
-        return "low"
+
+
 
 def slugify_tag(tag):
     """Convert a tag to a URL-friendly slug"""
@@ -128,6 +56,22 @@ def create_dashboard(results, output_path=None, is_update=False):
     
     # Ensure directory exists
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
+    # If results is empty, try to load from enriched JSON files
+    if not results:
+        results = {}
+        enriched_dir = os.path.join("results", "html", "enriched")
+        if os.path.exists(enriched_dir):
+            for filename in os.listdir(enriched_dir):
+                if filename.endswith("_enriched.json"):
+                    domain = filename.replace("_enriched.json", "")
+                    try:
+                        with open(os.path.join(enriched_dir, filename), 'r') as f:
+                            findings = json.load(f)
+                            if findings:
+                                results[domain] = findings
+                    except Exception as e:
+                        print(f"Error loading {filename}: {e}")
     
     # Start with the HTML template
     with open(output_path, "w") as f_handle:
@@ -516,6 +460,53 @@ def create_dashboard(results, output_path=None, is_update=False):
             font-size: 0.85rem;
             font-weight: 500;
         }
+        .status-link {
+            text-decoration: none;
+            color: inherit;
+            display: block;
+            transition: all 0.2s ease;
+        }
+        .status-link:hover {
+            text-decoration: none;
+            color: inherit;
+            transform: translateY(-2px);
+        }
+        .quick-filters {
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid #e9ecef;
+        }
+        .quick-filters .form-select {
+            font-size: 0.85rem;
+        }
+        .quick-filters .btn {
+            font-size: 0.85rem;
+            transition: all 0.2s ease;
+        }
+        .quick-filters .btn:hover {
+            transform: translateY(-1px);
+        }
+        .quick-filters .collapse {
+            border-radius: 8px;
+        }
+        .quick-filters .card-body {
+            background-color: #f8f9fa;
+            border: 1px solid #e9ecef;
+        }
+        .quick-filters .card-body a {
+            color: #495057;
+            font-size: 0.8rem;
+        }
+        .quick-filters .card-body a:hover {
+            color: #007bff;
+        }
+        .quick-filters .fas.fa-chevron-down {
+            transition: transform 0.2s ease;
+        }
+        .quick-filters .btn[aria-expanded="true"] .fas.fa-chevron-down {
+            transform: rotate(180deg);
+        }
         </style>
     </head>
     <body>
@@ -544,11 +535,7 @@ def create_dashboard(results, output_path=None, is_update=False):
                         <option value="all">All Tags</option>
                     </select>
                 </div>
-                <div class="filter-item">
-                    <select class="form-select" id="tech-filter">
-                        <option value="all">All Technologies</option>
-                    </select>
-                </div>
+
                 <div class="filter-item">
                     <button class="btn btn-primary w-100" id="reset-filters">Reset Filters</button>
                 </div>
@@ -562,13 +549,9 @@ def create_dashboard(results, output_path=None, is_update=False):
         all_tags = set()
         all_techs = set()
         all_domain_techs = {}
-        all_vulnerabilities = []
+
         
-        # Initialize counters for vulnerability severity
-        critical_count = 0
-        high_count = 0
-        medium_count = 0
-        low_count = 0
+
         
         # Get current timestamp
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -606,46 +589,13 @@ def create_dashboard(results, output_path=None, is_update=False):
             techs_with_version = 0
             tech_categories = Counter()
             
-            # Count vulnerabilities
-            domain_vulns = {"critical": 0, "high": 0, "medium": 0, "low": 0}
-            
             for f in findings:
-                tech = f.get('tech', {})
-                if tech:
-                    for tech_name, tech_info in tech.items():
-                        if tech_name in ["cve_vulns", "cve_details"]:
-                            continue
-                        
-                        domain_techs[tech_name] += 1
-                        all_techs.add(tech_name)
-                        
-                        # Count techs with version
-                        if isinstance(tech_info, dict) and tech_info.get('version'):
-                            techs_with_version += 1
-                            tech_details[tech_name] = tech_info.get('version')
-                            
-                        # Categorize technology
-                        category = categorize_technology(tech_name)
-                        tech_categories[category] += 1
+                # Basic finding processing (no tech/CVE analysis)
+                pass
             
-                # Extract CVE details
-                if tech and "cve_details" in tech:
-                    for pkg, details in tech["cve_details"].items():
-                        if isinstance(details, dict) and "ids" in details:
-                            for cve_id in details["ids"]:
-                                severity = get_vuln_severity(cve_id)
-                                domain_vulns[severity.lower()] += 1
-                                all_vulnerabilities.append({
-                                    "id": cve_id,
-                                    "severity": severity.lower(),
-                                    "domain": domain
-                                })
-            
-            # Store domain techs for later use in security posture
+            # Store basic domain info for later use
             all_domain_techs[domain] = {
-                "techs": dict(domain_techs),
-                "tech_categories": dict(tech_categories),
-                "vulnerabilities": domain_vulns
+                "findings_count": len(findings)
             }
             
             # Write domain card
@@ -657,78 +607,66 @@ def create_dashboard(results, output_path=None, is_update=False):
                     
                     <div class="status-indicator">
                         <div class="status-count">
-                            <span class="status-count-value status-new">{new_count}</span>
-                            <small>New</small>
-                            </div>
-                        <div class="status-count">
-                            <span class="status-count-value status-changed">{changed_count}</span>
-                            <small>Changed</small>
-                            </div>
-                        <div class="status-count">
-                            <span class="status-count-value status-existing">{existing_count}</span>
-                            <small>Existing</small>
-                            </div>
+                            <a href="{safe_domain}_findings.html?status=new" class="status-link">
+                                <span class="status-count-value status-new">{new_count}</span>
+                                <small>New</small>
+                            </a>
                         </div>
-                        
-                    <h6 class="fw-bold mb-3">Technology Stack</h6>
-                            <div class="tech-stats-container">
-                                <div class="tech-stat-card">
-                                    <div class="tech-stat-value">{len(domain_techs)}</div>
-                            <div class="tech-stat-label">TECHNOLOGIES</div>
+                        <div class="status-count">
+                            <a href="{safe_domain}_findings.html?status=changed" class="status-link">
+                                <span class="status-count-value status-changed">{changed_count}</span>
+                                <small>Changed</small>
+                            </a>
                         </div>
-                                <div class="tech-stat-card">
-                                    <div class="tech-stat-value">{techs_with_version}</div>
-                            <div class="tech-stat-label">WITH VERSION</div>
+                        <div class="status-count">
+                            <a href="{safe_domain}_findings.html?status=existing" class="status-link">
+                                <span class="status-count-value status-existing">{existing_count}</span>
+                                <small>Existing</small>
+                            </a>
+                        </div>
                     </div>
-                                <div class="tech-stat-card">
-                            <div class="tech-stat-value">{sum(domain_vulns.values())}</div>
-                            <div class="tech-stat-label">CVES</div>
-                </div>
-            </div>
+                    
+                    <!-- Quick Filter Dropdowns -->
+                    <div class="quick-filters mt-3">
+                        <div class="row">
+                            <div class="col-md-4">
+                                <button class="btn btn-outline-success btn-sm w-100" type="button" data-bs-toggle="collapse" data-bs-target="#new-urls-{safe_domain}" aria-expanded="false">
+                                    <i class="fas fa-chevron-down me-2"></i>New URLs ({new_count})
+                                </button>
+                                <div class="collapse mt-2" id="new-urls-{safe_domain}">
+                                    <div class="card card-body p-2" style="max-height: 200px; overflow-y: auto;">
+                                        {(''.join([f'<div class="mb-1"><small><a href="{f.get("url", "#")}" target="_blank" class="text-decoration-none">{f.get("url", "N/A")}</a></small></div>' for f in findings if f.get("finding_status") == "new"]))}
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <button class="btn btn-outline-warning btn-sm w-100" type="button" data-bs-toggle="collapse" data-bs-target="#changed-urls-{safe_domain}" aria-expanded="false">
+                                    <i class="fas fa-chevron-down me-2"></i>Changed URLs ({changed_count})
+                                </button>
+                                <div class="collapse mt-2" id="changed-urls-{safe_domain}">
+                                    <div class="card card-body p-2" style="max-height: 200px; overflow-y: auto;">
+                                        {(''.join([f'<div class="mb-1"><small><a href="{f.get("url", "#")}" target="_blank" class="text-decoration-none">{f.get("url", "N/A")}</a></small></div>' for f in findings if f.get("finding_status") == "changed"]))}
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <button class="btn btn-outline-secondary btn-sm w-100" type="button" data-bs-toggle="collapse" data-bs-target="#existing-urls-{safe_domain}" aria-expanded="false">
+                                    <i class="fas fa-chevron-down me-2"></i>Existing URLs ({existing_count})
+                                </button>
+                                <div class="collapse mt-2" id="existing-urls-{safe_domain}">
+                                    <div class="card card-body p-2" style="max-height: 200px; overflow-y: auto;">
+                                        {(''.join([f'<div class="mb-1"><small><a href="{f.get("url", "#")}" target="_blank" class="text-decoration-none">{f.get("url", "N/A")}</a></small></div>' for f in findings if f.get("finding_status") == "existing"]))}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                        
+
             """)
             
-            # Add tech categories
-            if tech_categories:
-                tech_cat_html = '<div class="tech-categories-grid">'
-                for category, count in tech_categories.most_common(5):
-                    icon = "fas fa-code"
-                    if "frontend" in category.lower():
-                        icon = "fas fa-desktop"
-                    elif "backend" in category.lower():
-                        icon = "fas fa-server"
-                    elif "cloud" in category.lower() or "cdn" in category.lower():
-                        icon = "fas fa-cloud"
-                    elif "security" in category.lower():
-                        icon = "fas fa-shield-alt"
-                    elif "analytics" in category.lower():
-                        icon = "fas fa-chart-line"
-                    
-                    tech_cat_html += f'<div class="tech-category-item"><i class="{icon}"></i> {category} ({count})</div>'
-                tech_cat_html += '</div>'
-                f_handle.write(tech_cat_html)
-            
-            # Add view technologies button with improved styling
-            f_handle.write(f'''
-            <div class="mt-3 mb-3">
-                <button class="btn btn-outline-primary btn-sm view-tech-btn" onclick="toggleDetails(this, 'tech-details-{safe_domain}')">
-                    <i class="fas fa-chevron-right tech-chevron"></i> View technologies
-                </button>
-                            </div>
-            <div id="tech-details-{safe_domain}" class="tech-details">
-            ''')
-            
-            # Add tech details
-            for tech_name, count in domain_techs.most_common(10):
-                version_html = ""
-                if tech_name in tech_details:
-                    version_html = f'<span class="tech-version">{tech_details[tech_name]}</span>'
-                    
-                f_handle.write(f'<div class="tech-item"><span>{tech_name}</span>{version_html}</div>')
-            
-            if len(domain_techs) > 10:
-                f_handle.write(f'<div class="text-center mt-2"><small>+ {len(domain_techs) - 10} more</small></div>')
-            
-            f_handle.write('</div>')  # Close tech-details
+
+
             
             # Add special counters for downloadables and secrets
             downloadable_count = sum(1 for f in findings if f.get('download_meta', {}).get('is_downloadable'))
@@ -795,25 +733,6 @@ def create_dashboard(results, output_path=None, is_update=False):
                 
                 f_handle.write('</div></div>')
             
-            # Add vulnerability summary
-            if sum(domain_vulns.values()) > 0:
-                f_handle.write("""
-                <div class="mt-3">
-                    <h6 class="fw-bold">Vulnerabilities</h6>
-                    <div>
-                """)
-                
-                if domain_vulns["critical"] > 0:
-                    f_handle.write(f'<span class="badge bg-danger me-1 mb-1">Critical: {domain_vulns["critical"]}</span>')
-                if domain_vulns["high"] > 0:
-                    f_handle.write(f'<span class="badge bg-warning text-dark me-1 mb-1">High: {domain_vulns["high"]}</span>')
-                if domain_vulns["medium"] > 0:
-                    f_handle.write(f'<span class="badge bg-info text-dark me-1 mb-1">Medium: {domain_vulns["medium"]}</span>')
-                if domain_vulns["low"] > 0:
-                    f_handle.write(f'<span class="badge bg-secondary me-1 mb-1">Low: {domain_vulns["low"]}</span>')
-                    
-                f_handle.write('</div></div>')
-            
             # Add tags
             if tags:
                 f_handle.write("""
@@ -828,120 +747,15 @@ def create_dashboard(results, output_path=None, is_update=False):
                     
                 f_handle.write('</div></div>')
             
-            # Add security posture if available
-            try:
-                from utils.ai_analyzer import get_security_posture
-                posture = get_security_posture(domain, findings)
-                if posture:
-                    # Calculate security score
-                    score = posture.get('score', 0)
-                    score_text = "LOW"
-                    score_color = "danger"
-                    
-                    if score >= 8:
-                        score_text = "HIGH"
-                        score_color = "warning"
-                    elif score >= 5:
-                        score_text = "MEDIUM"
-                        score_color = "info"
-                        
-                    f_handle.write(f"""
-                    <div class="mt-3">
-                        <h6 class="fw-bold">Security Posture</h6>
-                        <div class="security-posture">
-                            <div class="text-end mb-2">
-                                <span class="badge bg-{score_color}">{score_text} {score}/10</span>
-                            </div>
-                            <div class="security-summary">{posture.get('summary', '')}</div>
-                        </div>
-                    </div>
-            """)
-            except Exception as e:
-                pass
+
             
             f_handle.write("""
                 </div>
             </div>
             """)
         
-        # Count vulnerabilities by severity
-        critical_count = 0
-        high_count = 0
-        medium_count = 0
-        low_count = 0
-        
-        if all_vulnerabilities:
-            critical_count = sum(1 for v in all_vulnerabilities if v["severity"] == "critical")
-            high_count = sum(1 for v in all_vulnerabilities if v["severity"] == "high")
-            medium_count = sum(1 for v in all_vulnerabilities if v["severity"] == "medium")
-            low_count = sum(1 for v in all_vulnerabilities if v["severity"] == "low")
-        
-        # Create vulnerability summary section
-        f_handle.write(f"""
-        <div class="vulnerability-summary">
-            <h3>Vulnerability Summary</h3>
-            <div class="row">
-                <div class="col-md-3">
-                    <div class="vulnerability-stat">
-                        <div class="vulnerability-count critical-count">{critical_count}</div>
-                        <div class="vulnerability-label">CRITICAL</div>
-                </div>
-                                </div>
-                <div class="col-md-3">
-                    <div class="vulnerability-stat">
-                        <div class="vulnerability-count high-count">{high_count}</div>
-                        <div class="vulnerability-label">HIGH</div>
-                                </div>
-                                </div>
-                <div class="col-md-3">
-                    <div class="vulnerability-stat">
-                        <div class="vulnerability-count medium-count">{medium_count}</div>
-                        <div class="vulnerability-label">MEDIUM</div>
-                    </div>
-                </div>
-                <div class="col-md-3">
-                    <div class="vulnerability-stat">
-                        <div class="vulnerability-count low-count">{low_count}</div>
-                        <div class="vulnerability-label">LOW</div>
-                                </div>
-                            </div>
-                        </div>
-                        
-            <div class="mt-4">
-                <h5>Recommended Actions</h5>
-                <ul class="recommendations-list">
-                    <li>Update software components with known vulnerabilities</li>
-                    <li>Implement security headers to protect against common web attacks</li>
-                    <li>Review findings tagged as "Critical" or "High" priority first</li>
-                </ul>
-                </div>
-            
-            <div class="mt-3">
-                <div class="row">
-                    <div class="col-md-12">
-                        <div class="severity-legend text-center">
-                            <div class="severity-legend-item me-3">
-                                <div class="severity-legend-color" style="background-color: #dc3545;"></div>
-                                <span>Critical</span>
-            </div>
-                            <div class="severity-legend-item me-3">
-                                <div class="severity-legend-color" style="background-color: #fd7e14;"></div>
-                                <span>High</span>
-                    </div>
-                            <div class="severity-legend-item me-3">
-                                <div class="severity-legend-color" style="background-color: #0dcaf0;"></div>
-                                <span>Medium</span>
-                            </div>
-                            <div class="severity-legend-item">
-                                <div class="severity-legend-color" style="background-color: #6c757d;"></div>
-                                <span>Low</span>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                </div>
-            </div>
-            """)
+
+
         
         f_handle.write('</div>') # Close domains-container
         
@@ -969,7 +783,7 @@ def create_dashboard(results, output_path=None, is_update=False):
             const domainFilter = document.getElementById('domain-filter');
             const statusFilter = document.getElementById('status-filter');
             const tagFilter = document.getElementById('tag-filter');
-            const techFilter = document.getElementById('tech-filter');
+
                 const resetFilters = document.getElementById('reset-filters');
                 const domainItems = document.querySelectorAll('.domain-item');
             
@@ -992,30 +806,13 @@ def create_dashboard(results, output_path=None, is_update=False):
                     tagFilter.appendChild(option);
                 }});
             
-            // Populate tech filter dynamically from findings
-                const allTechs = new Set();
-                domainItems.forEach(item => {{
-                    const techDetails = item.querySelectorAll('.tech-details .tech-item');
-                    techDetails.forEach(tech => {{
-                        const techName = tech.querySelector('span');
-                        if (techName) {{
-                            allTechs.add(techName.textContent);
-                        }}
-                    }});
-                }});
-                
-                allTechs.forEach(tech => {{
-                    const option = document.createElement('option');
-                    option.value = tech;
-                    option.textContent = tech;
-                    techFilter.appendChild(option);
-                }});
+
                 
                 function applyFilters() {{
                 const domainText = domainFilter.value.toLowerCase();
                 const statusValue = statusFilter.value;
                 const tagValue = tagFilter.value;
-                const techValue = techFilter.value;
+
                     
                     domainItems.forEach(item => {{
                         const domainElement = item.querySelector('.domain-title a');
@@ -1052,61 +849,27 @@ def create_dashboard(results, output_path=None, is_update=False):
                             );
                         }}
                         
-                        // Tech filter
-                    let matchesTech = true;
-                        if (techValue !== 'all') {{
-                            // Check if tech details contain the selected tech
-                            const techDetails = item.querySelectorAll('.tech-details .tech-item');
-                            matchesTech = Array.from(techDetails).some(tech => 
-                                tech.textContent.toLowerCase().includes(techValue.toLowerCase())
-                            );
-                        }}
-                        
-                        item.style.display = (matchesDomain && matchesStatus && matchesTag && matchesTech) ? 'block' : 'none';
+                        item.style.display = (matchesDomain && matchesStatus && matchesTag) ? 'block' : 'none';
                     }});
                 }}
             
             domainFilter.addEventListener('input', applyFilters);
             statusFilter.addEventListener('change', applyFilters);
             tagFilter.addEventListener('change', applyFilters);
-            techFilter.addEventListener('change', applyFilters);
+
             
-                resetFilters.addEventListener('click', function() {{
+                                resetFilters.addEventListener('click', function() {{
                 domainFilter.value = '';
                 statusFilter.value = 'all';
                 tagFilter.value = 'all';
-                techFilter.value = 'all';
+
                     applyFilters();
                 }});
                 
-                // Initialize vulnerability chart if it exists
-                const cveChartEl = document.getElementById('cveChart');
-                if (cveChartEl) {{
-                    const ctx = cveChartEl.getContext('2d');
-                    new Chart(ctx, {{
-                        type: 'doughnut',
-                        data: {{
-                            labels: ['Critical', 'High', 'Medium', 'Low'],
-                            datasets: [{{
-                                data: [{critical_count}, {high_count}, {medium_count}, {low_count}],
-                                backgroundColor: [
-                                    'rgba(220, 53, 69, 0.8)',
-                                    'rgba(253, 126, 20, 0.8)',
-                                    'rgba(255, 193, 7, 0.8)',
-                                    'rgba(108, 117, 125, 0.8)'
-                                ],
-                                borderWidth: 1
-                            }}]
-                        }},
-                        options: {{
-                            plugins: {{
-                                legend: {{
-                                    display: false
-                                }}
-                            }}
-                        }}
-                    }});
-                }}
+
+
+
+
             }});
         </script>
     </body>
@@ -1155,18 +918,13 @@ def export_tag_based_reports(domain, findings, output_dir=HTML_REPORT_DIR):
     existing_count = sum(1 for f in findings if f is not None and f.get('finding_status') == 'existing')
     total_count = len([f for f in findings if f is not None])
     
-    # Calculate CVEs and secrets counts
-    cve_count = 0
+    # Calculate secrets count
     secret_count = 0
     
     for f in findings:
         if f is None:
             continue
             
-        # Count CVEs
-        tech = f.get('tech', {})
-        cve_count += tech.get('cve_vulns', 0)
-        
         # Count secrets
         dm = f.get('download_meta', {})
         if dm:
@@ -1188,20 +946,7 @@ def export_tag_based_reports(domain, findings, output_dir=HTML_REPORT_DIR):
             # New format with package details
             for pkg, info in cve_details.items():
                 if isinstance(info, dict) and 'ids' in info:
-                    for cve_id in info['ids']:
-                        all_cve_ids.append(cve_id)
-                        # Determine severity
-                        from utils.tech_helpers import get_vuln_severity
-                        severity = get_vuln_severity(cve_id)
-                        cve_by_severity[severity] += 1
-        elif isinstance(cve_details, list):
-            # Legacy format with just IDs
-            for cve_id in cve_details:
-                all_cve_ids.append(cve_id)
-                # Determine severity
-                from utils.tech_helpers import get_vuln_severity
-                severity = get_vuln_severity(cve_id)
-                cve_by_severity[severity] += 1
+                    pass
 
     # Enhanced HTML with better styling
     html = f"""
@@ -1465,6 +1210,9 @@ def export_tag_based_reports(domain, findings, output_dir=HTML_REPORT_DIR):
     </html>
     """
 
+    # Ensure the directory exists
+    os.makedirs(os.path.dirname(tag_index_file), exist_ok=True)
+    
     with open(tag_index_file, "w") as f:
         f.write(html)
 
@@ -1483,6 +1231,9 @@ def make_enhanced_subpage_for_tag(domain, tag, items, subpage_name, output_dir, 
         'changed': 1,
         'existing': 2
     }.get(x.get('finding_status', 'existing'), 3))
+    
+    # Ensure the directory exists
+    os.makedirs(os.path.dirname(subpage_name), exist_ok=True)
     
     with open(subpage_name, "w") as f:
         # Page header and CSS
@@ -1670,20 +1421,7 @@ def make_enhanced_subpage_for_tag(domain, tag, items, subpage_name, output_dir, 
                                 </div>
                             </div>
 
-                            <!-- CVE stats -->
-                            <div class="mb-2">
-                                <h6 class="mb-1">Vulnerabilities</h6>
-                                <div class="d-flex align-items-center">
-                                    <span class="badge bg-warning me-2">
-                                        <i class="fas fa-exclamation-triangle me-1"></i> 
-                                        {sum(1 for item in items if item.get('tech', {}).get('cve_vulns', 0) > 0)}
-                                    </span>
-                                    <button class="btn btn-sm btn-outline-warning" type="button" data-bs-toggle="collapse" 
-                                        data-bs-target="#cveDetails" aria-expanded="false">
-                                        View Details
-                                    </button>
-                    </div>
-                        </div>
+
                             </div>
                             </div>
                 </div>
@@ -1740,53 +1478,7 @@ def make_enhanced_subpage_for_tag(domain, tag, items, subpage_name, output_dir, 
                 </div>
         </div>
         
-        <!-- CVE details -->
-        <div class="collapse mb-4" id="cveDetails">
-            <div class="card">
-                <div class="card-header">
-                    <h5>Vulnerabilities</h5>
-                </div>
-                <div class="card-body">
-                    <table class="table table-striped">
-                        <thead>
-                            <tr>
-                                <th>Path</th>
-                                <th>Package</th>
-                                <th>Version</th>
-                                <th>CVE IDs</th>
-                                <th>Severity</th>
-                </tr>
-                        </thead>
-                        <tbody>""")
-        
-        # Add CVE rows
-        cve_rows_added = False
-        for item in items:
-            tech = item.get('tech', {})
-            if tech and "cve_details" in tech:
-                for pkg, details in tech["cve_details"].items():
-                    if isinstance(details, dict) and "ids" in details:
-                        cve_rows_added = True
-                        path = item.get('path', '/')
-                        version = details.get('version', 'Unknown')
-                        ids = '<br>'.join(details.get('ids', []))
-                        severity_badges = []
-                        for cve_id in details.get('ids', []):
-                            severity = get_vuln_severity(cve_id)
-                            color = severity_to_color(severity)
-                            severity_badges.append(f'<span class="badge bg-{color}">{severity.upper()}</span>')
-                        badges_html = '<br>'.join(severity_badges)
-                        f.write(f'<tr><td>{path}</td><td>{pkg}</td><td>{version}</td><td>{ids}</td><td>{badges_html}</td></tr>')
-        
-        if not cve_rows_added:
-            f.write('<tr><td colspan="5" class="text-center">No vulnerabilities found</td></tr>')
-        
-        f.write("""
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
+
         
         <div class="findings-container">
 """)
@@ -1824,19 +1516,7 @@ def make_enhanced_subpage_for_tag(domain, tag, items, subpage_name, output_dir, 
                 else:
                     screenshot_html = f'<div class="screenshot-container"><p class="text-muted">Screenshot not available</p></div>'
                     
-            # Format technologies
-            tech_html = ""
-            tech = item.get('tech', {})
-            if tech:
-                non_cve_techs = {k: v for k, v in tech.items() if k not in ["cve_vulns", "cve_details"]}
-                if non_cve_techs:
-                    tech_html = '<div class="mt-3"><h6>Technologies</h6><div>'
-                    for tech_name, tech_info in non_cve_techs.items():
-                        if isinstance(tech_info, dict) and tech_info.get('version'):
-                            tech_html += f'<span class="badge bg-secondary tech-badge">{tech_name} {tech_info["version"]}</span>'
-                        else:
-                            tech_html += f'<span class="badge bg-secondary tech-badge">{tech_name}</span>'
-                    tech_html += '</div></div>'
+
                     
             # Format downloadable information
             download_html = ""
@@ -1913,7 +1593,6 @@ def make_enhanced_subpage_for_tag(domain, tag, items, subpage_name, output_dir, 
                         </div>
                     </div>
                     
-                    {tech_html}
                     {download_html}
                     {secrets_html}
                 </div>
@@ -2333,9 +2012,6 @@ def export_domain_findings(domain, findings, output_dir=None):
         .tag-badge {{
             font-size: 85%;
         }}
-        .technology-section {{
-            margin-top: 15px;
-        }}
         .vulnerability-section {{
             background-color: #fff3cd;
             padding: 10px;
@@ -2499,20 +2175,7 @@ def export_domain_findings(domain, findings, output_dir=None):
                                 </div>
                             </div>
 
-                            <!-- CVE stats -->
-                            <div class="mb-2">
-                                <h6 class="mb-1">Vulnerabilities</h6>
-                                <div class="d-flex align-items-center">
-                                    <span class="badge bg-warning me-2">
-                                        <i class="fas fa-exclamation-triangle me-1"></i> 
-                                        {sum(1 for finding in findings if finding.get('tech', {}).get('cve_vulns', 0) > 0)}
-                                    </span>
-                                    <button class="btn btn-sm btn-outline-warning" type="button" data-bs-toggle="collapse" 
-                                        data-bs-target="#cveDetails" aria-expanded="false">
-                                        View Details
-                                    </button>
-                                </div>
-                            </div>
+
                         </div>
                     </div>
                 </div>
@@ -2567,37 +2230,7 @@ def export_domain_findings(domain, findings, output_dir=None):
             </div>
         </div>
         
-        <!-- CVE details -->
-        <div class="collapse mb-4" id="cveDetails">
-            <div class="card">
-                <div class="card-header">
-                    <h5>Vulnerabilities</h5>
-                </div>
-                <div class="card-body">
-                    <table class="table table-striped">
-                        <thead>
-                            <tr>
-                                <th>Path</th>
-                                <th>Package</th>
-                                <th>Version</th>
-                                <th>CVE IDs</th>
-                                <th>Severity</th>
-                </tr>
-                        </thead>
-                        <tbody>
-                            {(''.join([
-                                ''.join([
-                                    f"<tr><td>{finding.get('path', '/')}</td><td>{pkg}</td><td>{details.get('version', 'Unknown')}</td><td>{'<br>'.join(details.get('ids', []))}</td><td>{'<br>'.join([f'<span class=\"badge bg-{severity_to_color(get_vuln_severity(cve_id))}\">{get_vuln_severity(cve_id).upper()}</span>' for cve_id in details.get('ids', [])])}</td></tr>"
-                                    for pkg, details in finding.get('tech', {}).get('cve_details', {}).items()
-                                    if isinstance(details, dict) and details.get('ids')
-                                ])
-                                for finding in findings if finding.get('tech', {}).get('cve_details')
-                            ]))}
-                    </tbody>
-                </table>
-            </div>
-            </div>
-        </div>
+
         
         <div class="findings-container">
 """)
@@ -2645,32 +2278,9 @@ def export_domain_findings(domain, findings, output_dir=None):
                     headers_html += f'<div class="header-item"><span class="header-name">{header_name}:</span> {header_value}</div>'
                 headers_html += '</div>'
             
-            # Format technologies
-            tech_html = ""
-            tech = finding.get('tech', {})
-            if tech:
-                non_cve_techs = {k: v for k, v in tech.items() if k not in ["cve_vulns", "cve_details"]}
-                if non_cve_techs:
-                    tech_html = '<div class="technology-section"><h6>Technologies</h6><div>'
-                    for tech_name, tech_info in non_cve_techs.items():
-                        if isinstance(tech_info, dict) and tech_info.get('version'):
-                            tech_html += f'<span class="badge bg-secondary tech-badge">{tech_name} {tech_info["version"]}</span>'
-                        else:
-                            tech_html += f'<span class="badge bg-secondary tech-badge">{tech_name}</span>'
-                    tech_html += '</div></div>'
+
             
-            # Format vulnerabilities
-            vuln_html = ""
-            if tech and "cve_details" in tech:
-                vuln_html = '<div class="vulnerability-section mt-3"><h6><i class="fas fa-exclamation-triangle"></i> Vulnerabilities</h6>'
-                for pkg, details in tech["cve_details"].items():
-                    if isinstance(details, dict) and "ids" in details:
-                        vuln_html += f'<div><strong>{pkg}</strong> {details.get("version", "")}</div><ul>'
-                        for cve_id in details["ids"]:
-                            severity = get_vuln_severity(cve_id)
-                            vuln_html += f'<li>{cve_id} - <span class="badge bg-{severity_to_color(severity)}">{severity.upper()}</span></li>'
-                        vuln_html += '</ul>'
-                vuln_html += '</div>'
+
                     
             # Format downloadable information
             download_html = ""
@@ -2699,6 +2309,10 @@ def export_domain_findings(domain, findings, output_dir=None):
             # Format secrets information
             secrets_html = ""
             secrets = finding.get('secrets', [])
+            
+            # Set empty tech and vuln HTML (removed during CVE/tech cleanup)
+            tech_html = ""
+            vuln_html = ""
             if secrets:
                 secrets_html = f"""
                 <div class="secret-section">
@@ -2789,6 +2403,19 @@ def export_domain_findings(domain, findings, output_dir=None):
                 option.textContent = tag;
                 tagFilter.appendChild(option);
             });
+            
+            // Handle URL parameters for filtering
+            const urlParams = new URLSearchParams(window.location.search);
+            const statusParam = urlParams.get('status');
+            const tagParam = urlParams.get('tag');
+            
+            // Apply URL parameters to filters
+            if (statusParam) {
+                statusFilter.value = statusParam;
+            }
+            if (tagParam) {
+                tagFilter.value = tagParam;
+            }
         
         function applyFilters() {
                 const searchTerm = searchInput.value.toLowerCase();
@@ -2818,6 +2445,11 @@ def export_domain_findings(domain, findings, output_dir=None):
                 tagFilter.value = 'all';
                 applyFilters();
             });
+            
+            // Apply filters on page load if URL parameters are present
+            if (statusParam || tagParam) {
+                applyFilters();
+            }
     });
     </script>
 </body>

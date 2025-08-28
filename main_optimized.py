@@ -8,10 +8,12 @@ from dotenv import load_dotenv
 from utils.scanner import run_ffuf, retry_rate_limited_paths
 from utils.filters import filter_false_positives
 from utils.screenshot import take_screenshots_parallel, filter_screenshot_tasks, initialize_screenshot_system
+from utils.false_positive_filter import apply_false_positive_filter
+from utils.smart_filter import SmartFilter
 from utils.ai_analyzer import classify_screenshot_with_gpt, batch_classify_screenshots
 from utils.slack_alert import send_consolidated_slack_alert, send_rate_limit_alert, send_critical_alert, send_simple_slack_message
 from utils.reporter import export_tag_based_reports, create_dashboard
-from utils.enhanced_reporter import create_enhanced_dashboard
+
 from utils.enhanced_slack import send_enhanced_slack_alert
 from utils.db_handler import reset_db, init_db, batch_track_findings
 from utils.tag_validator import validate_tagged_entry
@@ -49,9 +51,8 @@ def capture_headers(url, timeout=10):
         dict: Headers dictionary or empty dict if failed
     """
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36'
-        }
+        from utils.user_agent_manager import get_realistic_headers
+        headers = get_realistic_headers(include_scanner_header=True)
         
         response = requests.head(url, headers=headers, timeout=timeout, allow_redirects=True)
         
@@ -256,6 +257,55 @@ def process_domain_optimized(domain, wordlist, ignore_hash, screenshot_workers, 
         
         if not filtered:
             logger.warning(f"Nothing left after filtering → skipping {domain}")
+            log_skipped(domain)
+            return None, perf_metrics
+
+        # Enhanced filtering with additional modules
+        enhanced_filter_start = time.time()
+        
+        # Initialize smart filter
+        smart_filter = SmartFilter()
+        
+        # Adapt smart filter to domain characteristics
+        smart_filter.adapt_to_domain(domain, filtered)
+        
+        # Apply additional false positive filtering
+        logger.info(f"Applying enhanced false positive filtering to {len(filtered)} results...")
+        enhanced_filtered = []
+        
+        for entry in filtered:
+            # Skip if already marked as downloadable
+            if entry.get("downloadable"):
+                enhanced_filtered.append(entry)
+                continue
+                
+            # Apply smart filtering
+            is_fp, reason = smart_filter.is_likely_false_positive(
+                entry["url"], 
+                entry.get("content", ""), 
+                domain
+            )
+            
+            if is_fp:
+                logger.debug(f"Smart filter rejected {entry['url']}: {reason}")
+                continue
+                
+            # Apply false positive filter
+            if not apply_false_positive_filter(entry, enhanced_filtered):
+                logger.debug(f"False positive filter rejected {entry['url']}")
+                continue
+                
+            enhanced_filtered.append(entry)
+        
+        # Update filtered results
+        filtered = enhanced_filtered
+        enhanced_filter_duration = time.time() - enhanced_filter_start
+        perf_metrics['enhanced_filter_time'] = enhanced_filter_duration
+        
+        logger.info(f"Enhanced filtering: {len(filtered)} results kept from {len(raw)} raw results")
+        
+        if not filtered:
+            logger.warning(f"Nothing left after enhanced filtering → skipping {domain}")
             log_skipped(domain)
             return None, perf_metrics
 
@@ -648,15 +698,7 @@ def main():
         dashboard_path = os.path.join("results", "html", "dashboard.html")
         create_dashboard({}, dashboard_path)
         
-        # Try to create enhanced dashboard
-        try:
-            enhanced_dashboard_path = os.path.join("results", "html", "enhanced_dashboard.html")
-            logger.info("Creating initial enhanced dashboard...")
-            create_enhanced_dashboard({}, "results/html")
-            logger.info(f"Dashboard updated: {enhanced_dashboard_path}")
-        except Exception as e:
-            logger.error(f"Failed to create enhanced dashboard: {e}")
-            logger.warning("Falling back to raw findings dashboard.")
+
             
         # Get server hostname for dashboard URL
         # Use REPORT_BASE_URL for dashboard URL
@@ -733,27 +775,22 @@ def main():
             existing_findings = sum(sum(1 for f in fs if f.get('finding_status') == 'existing') for fs in results.values()) if results else 0
             scan_duration = time.time() - start_time
 
-            # Get high priority findings
-            high_priority_findings = []
-            from utils.ai_analyzer import get_category_priority
-
+            # Get new findings only
+            new_findings_list = []
             if results:
                 for domain, findings_list in results.items():
                     for finding in findings_list:
-                        tag = finding.get('ai_tag', 'Unknown')
-                        priority = get_category_priority(tag)
-                        if priority >= 8:  # High priority
+                        if finding.get('finding_status') == 'new':
                             finding_entry = {
                                 'domain': domain,
                                 'url': finding.get('url', ''),
                                 'path': finding.get('path', ''),
-                                'tag': tag,
-                                'status': finding.get('finding_status', 'unknown')
+                                'tag': finding.get('ai_tag', 'Unknown')
                             }
-                            high_priority_findings.append(finding_entry)
+                            new_findings_list.append(finding_entry)
 
             # Sort by domain
-            high_priority_findings.sort(key=lambda x: (x['domain'], x['tag'], x['url']))
+            new_findings_list.sort(key=lambda x: (x['domain'], x['tag'], x['url']))
 
             # Generate domain stats
             domain_stats = []
@@ -808,22 +845,20 @@ def main():
                     f"• :new: New findings: {new_findings}\n"
                 )
             
-            # Add high priority findings section
-            if high_priority_findings:
-                completion_message += f"\n:fire: *High Priority Security Findings*\n"
-                completion_message += ":large_orange_circle: *HIGH:*\n"
+            # Add new findings section
+            if new_findings_list:
+                completion_message += f"\n:new: *New Findings (Not in Previous Scan)*\n"
                 
                 # Limit to 5 findings to keep message size reasonable
-                shown_findings = min(5, len(high_priority_findings))
+                shown_findings = min(5, len(new_findings_list))
                 for i in range(shown_findings):
-                    finding = high_priority_findings[i]
-                    status_icon = ":new:" if finding['status'] == 'new' else ":arrows_counterclockwise:" if finding['status'] == 'changed' else ""
-                    completion_message += f"• {status_icon} {finding['domain']} - [{finding['tag']}]\n"
+                    finding = new_findings_list[i]
+                    completion_message += f"• {finding['domain']} - [{finding['tag']}]\n"
                     completion_message += f" └─ {finding['url']}\n"
                 
                 # Add note about remaining findings
-                if len(high_priority_findings) > shown_findings:
-                    completion_message += f" ...and {len(high_priority_findings) - shown_findings} more high priority findings\n"
+                if len(new_findings_list) > shown_findings:
+                    completion_message += f" ...and {len(new_findings_list) - shown_findings} more new findings\n"
             
             # Add domain breakdown
             if len(domain_stats) > 0:

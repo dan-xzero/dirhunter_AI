@@ -1,0 +1,17 @@
+qa.onequince.com
+api-staging.onequince.com/tax-management-service
+api-staging.onequince.com/tracking_service
+api-staging.onequince.com/transit-lead-time
+api-staging.onequince.com/translation-management-service
+api-staging.onequince.com/trust-safety-service
+api-staging.onequince.com/unified-payment-gateway
+api-staging.onequince.com/v3/api-docs
+api-staging.onequince.com/vendor-performance
+api-staging.onequince.com/vendor-report
+api-staging.onequince.com/warehouse-capacity
+api-staging.onequince.com/warehouse-inventory
+api-staging.onequince.com/warehouseServices
+api-staging.onequince.com/wops/api
+api-staging.onequince.com/workflow-control/restart
+api-staging.onequince.com/workflow-management-service
+api-staging.onequince.com/wos

@@ -212,7 +212,9 @@ def create_fallback_screenshot(url, output_path):
         
         # Try to fetch content if possible
         try:
-            response = requests.get(url, timeout=10, verify=False)
+            from utils.user_agent_manager import get_realistic_headers
+            headers = get_realistic_headers(include_scanner_header=True)
+            response = requests.get(url, headers=headers, timeout=10, verify=False)
             status = f"{response.status_code}"
             content = response.text[:500] + "..." if len(response.text) > 500 else response.text
             

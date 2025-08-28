@@ -181,6 +181,53 @@ class SmartFilter:
         }
         return stats
     
+    def adapt_to_domain(self, domain, findings):
+        """
+        Adapt filtering rules based on domain characteristics
+        
+        Args:
+            domain: The target domain
+            findings: List of findings to analyze
+        """
+        if not findings:
+            return
+        
+        # Analyze domain characteristics
+        api_count = sum(1 for f in findings if "/api/" in f.get("url", ""))
+        total_count = len(findings)
+        
+        # Calculate API ratio
+        api_ratio = api_count / total_count if total_count > 0 else 0
+        
+        # Adjust patterns based on domain type
+        if api_ratio > 0.3:  # API-heavy domain
+            # Add more API-specific patterns
+            api_patterns = [
+                r"/api/.*/v\d+/config",
+                r"/api/.*/v\d+/settings",
+                r"/api/.*/internal/config",
+                r"/api/.*/public/config",
+            ]
+            for pattern in api_patterns:
+                if pattern not in self.global_fp_patterns:
+                    self.global_fp_patterns.append(pattern)
+        elif api_ratio < 0.1:  # Traditional web domain
+            # Remove some API patterns that might be too restrictive
+            self.global_fp_patterns = [p for p in self.global_fp_patterns 
+                                     if not p.startswith("/api/")]
+        
+        # Learn from current findings
+        for finding in findings:
+            url = finding.get("url", "")
+            content = finding.get("content", "")
+            
+            # Track URL patterns
+            parsed = urlparse(url)
+            path_parts = parsed.path.split("/")
+            if len(path_parts) > 2:
+                pattern = "/".join(path_parts[:3]) + "/*"
+                self.url_pattern_stats[domain][pattern] += 1
+    
     def export_learned_patterns(self, filepath):
         """
         Export learned patterns for reuse

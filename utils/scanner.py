@@ -44,7 +44,9 @@ def smart_resolve_scheme(domain: str) -> str:
     # 3️⃣  Otherwise, try HTTPS then HTTP
     https_url = f"https://{domain}"
     try:
-        resp = requests.head(https_url, timeout=5, allow_redirects=True)
+        from utils.user_agent_manager import get_realistic_headers
+        headers = get_realistic_headers(include_scanner_header=True)
+        resp = requests.head(https_url, headers=headers, timeout=5, allow_redirects=True)
         if resp.status_code < 500:
             print(f"[+] Using HTTPS → {https_url}")
             return https_url  # Already has no trailing slash
@@ -99,6 +101,10 @@ def run_ffuf(domain,
     output_file   = tempfile.NamedTemporaryFile(delete=False, suffix=".json").name
     extension_arg = ",".join(extensions)
 
+    # Get realistic user agent for ffuf
+    from utils.user_agent_manager import get_ffuf_user_agent
+    user_agent = get_ffuf_user_agent()
+    
     cmd = [
         "ffuf",
         "-u",  url,
@@ -110,7 +116,7 @@ def run_ffuf(domain,
         "-fc", "404","403",  # Removed 429 from filter to track rate limits
         "-v",
         # "-x", "http://127.0.0.1:8080",
-        "-H", "User-agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36-FUZZ"
+        "-H", f"User-agent: {user_agent}"
     ]
 
     if adaptive_rate and int(adaptive_rate) > 0:

@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from utils.db_handler import init_db, get_stored_hash, update_hash_record, track_finding, get_finding_status
 import re, urllib.parse
 import json
+from typing import List
 
 # Import technology detection with fallback
 try:
@@ -50,7 +51,35 @@ SOFT_404_PHRASES = [
     # Common redirect messages
     "you will be redirected", "redirecting to", "please wait"
 ]
-EXCLUDE_PATTERNS = ["/healthz", "/status"]
+def get_exclude_patterns(domain: str = "") -> List[str]:
+    """
+    Get dynamic exclude patterns based on domain characteristics
+    
+    Args:
+        domain: The target domain to customize patterns for
+        
+    Returns:
+        List of regex patterns to exclude
+    """
+    base_patterns = ["/healthz", "/status"]
+    
+    # Add API patterns only if we detect API-heavy domains
+    # This could be enhanced with domain-specific logic
+    api_patterns = [
+        r"/api/.*/health$",
+        r"/api/.*/status$",
+        r"/api/.*/ping$",
+        r"/api/.*/healthz$",
+        r"/api/.*/ready$",
+        r"/api/.*/live$"
+    ]
+    
+    # For now, include API patterns by default, but this could be made smarter
+    # based on initial scan results or domain characteristics
+    return base_patterns + api_patterns
+
+# Default patterns for backward compatibility
+EXCLUDE_PATTERNS = get_exclude_patterns()
 DOMAIN_OVERRIDES = {}
 
 # Download detection config
@@ -232,15 +261,8 @@ def detect_catch_all_page(domain: str) -> tuple:
     return (False, None, None)
 
 # ─────────── CURL FETCHER ───────────
-HEADERS = {
-    # Use a common browser UA to avoid WAF blocks and add branding in a custom header
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0 Safari/537.36"
-    ),
-    "X-Scanner": "DirHunter-AI",
-}
+# Headers will be generated dynamically by user_agent_manager
+HEADERS = None  # Will be set dynamically
 
 
 def curl_fetch_hash(url: str):
@@ -263,8 +285,16 @@ def curl_fetch_hash(url: str):
     try:
         import warnings
         from urllib3.exceptions import InsecureRequestWarning
+        from utils.user_agent_manager import get_realistic_headers
+        
+        # Get dynamic headers
+        if HEADERS is None:
+            headers = get_realistic_headers(include_scanner_header=True)
+        else:
+            headers = HEADERS
+            
         # Ignore TLS cert errors so we can still inspect bodies with bad/hostname-mismatch certs
-        resp = requests.get(url, headers=HEADERS, timeout=15, allow_redirects=True, verify=True)
+        resp = requests.get(url, headers=headers, timeout=15, allow_redirects=True, verify=True)
         final_status = resp.status_code
 
         # Memory optimization: For HTML, only read what we need
@@ -369,24 +399,7 @@ def curl_fetch_hash(url: str):
                 else:
                     tech = None
 
-                # ⟶ CVE look-up for detected tech versions
-                if tech and (tech.get("version") or tech.get("wapp")):
-                    from utils.cve import check_components
-                    comps = []
-                    if tech.get("name") and tech.get("version"):
-                        comps.append({"name": tech["name"], "version": tech["version"]})
-                    if tech.get("wapp"):
-                        for n, vers in tech["wapp"].items():
-                            if isinstance(vers, (list, tuple)):
-                                v = vers[0] if vers else None
-                            else:
-                                v = vers
-                            if v:
-                                comps.append({"name": n, "version": v})
-                    cve_res = check_components(comps)
-                    if cve_res.get("total_vulns"):
-                        tech["cve_vulns"] = cve_res["total_vulns"]
-                        tech["cve_details"] = cve_res["details"]
+
             except Exception:
                 tech = None
 
@@ -450,16 +463,38 @@ def filter_false_positives(domain, results, ignore_hash=False, fast=False):
     freq = {}
     for r in results:
         freq[r["length"]] = freq.get(r["length"], 0) + 1
+    
+    # Find the most common length and also lengths that appear frequently
     common_len = max(freq.keys(), key=lambda k: freq[k]) if freq else None
+    
+    # Calculate threshold for "too common" lengths (dynamic based on results)
+    total_results = len(results)
+    # Adaptive threshold: 10% for small scans, 8% for medium, 6% for large scans
+    if total_results < 100:
+        threshold_percentage = 0.10  # 10%
+    elif total_results < 500:
+        threshold_percentage = 0.08  # 8%
+    else:
+        threshold_percentage = 0.06  # 6%
+    
+    common_length_threshold = max(3, int(total_results * threshold_percentage))
+    
+    # Find all lengths that appear too frequently
+    too_common_lengths = {length: count for length, count in freq.items() 
+                         if count >= common_length_threshold}
 
     base_kw = {"admin", "login", "dashboard", "config", "debug", "upload", "backup"}
     kw_set = base_kw | set(DOMAIN_OVERRIDES.get(domain.lower(), {}).get("keywords", []))
 
     stage1 = []
+    # Get dynamic exclude patterns for this domain
+    exclude_patterns = get_exclude_patterns(domain)
+    
     for r in results:
         url, status, length = r["url"].lower(), r["status"], r["length"]
 
-        if any(pat in url for pat in EXCLUDE_PATTERNS):
+        # Check against dynamic exclude patterns
+        if any(re.search(pat, url) for pat in exclude_patterns):
             log_skipped_endpoint(r["url"], reason="pattern-skip")
             continue
 
@@ -482,11 +517,19 @@ def filter_false_positives(domain, results, ignore_hash=False, fast=False):
         kw_hit = any(k in url for k in kw_set)
         short_rd = status in (301, 302) and "." not in r["path"].split("/")[-1]
 
-        keep = status in (200, 301, 302) and (length != common_len or kw_hit or short_rd)
+        # Enhanced filtering: check if length is too common
+        length_too_common = length in too_common_lengths
+        
+        # Keep if: good status AND (length is not too common OR has keywords OR is short redirect)
+        keep = status in (200, 301, 302) and (not length_too_common or kw_hit or short_rd)
+        
         if keep:
             stage1.append(r)
         else:
-            log_skipped_endpoint(r["url"], reason="length-filter")
+            if length_too_common:
+                log_skipped_endpoint(r["url"], reason="length-too-common")
+            else:
+                log_skipped_endpoint(r["url"], reason="length-filter")
 
     print(f"[~] After heuristic pass: {len(stage1)} kept / {len(results)-len(stage1)} skipped")
 
@@ -726,16 +769,7 @@ def inspect_download(body_bytes: bytes, content_type: str):
             except Exception:
                 pass
 
-            # 3️⃣  Node package CVE check if package.json detected
-            if '"dependencies"' in text and text.strip().startswith('{'):
-                try:
-                    from utils.cve import check_node_manifest
-                    cve_info = check_node_manifest(text)
-                    if cve_info and cve_info.get("total_vulns"):
-                        meta["cve_vulns"] = cve_info["total_vulns"]
-                        meta["cve_details"] = cve_info["details"]
-                except Exception:
-                    pass
+
         except Exception:
             pass
 

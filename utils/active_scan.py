@@ -222,13 +222,17 @@ def probe_paths(base_url: str, max_paths: int = 20, timeout: int = 10) -> Dict[s
         try:
             path_count += 1
             
+            # Get realistic headers
+            from utils.user_agent_manager import get_realistic_headers
+            headers = get_realistic_headers(include_scanner_header=True)
+            
             # Send a HEAD request first to avoid downloading large files
-            response = session.head(full_url, timeout=timeout, verify=False, 
+            response = session.head(full_url, headers=headers, timeout=timeout, verify=False, 
                                    allow_redirects=False)
             
             # If successful or redirected, check with a GET request
             if response.status_code in [200, 301, 302, 307, 308]:
-                response = session.get(full_url, timeout=timeout, verify=False, 
+                response = session.get(full_url, headers=headers, timeout=timeout, verify=False, 
                                       allow_redirects=False)
                 
                 if response.status_code == 200:
@@ -361,8 +365,12 @@ def perform_active_scan(url: str, timeout: int = 10) -> Dict[str, Any]:
     logger.info(f"Performing active scan on {url}")
     
     try:
+        # Get realistic headers
+        from utils.user_agent_manager import get_realistic_headers
+        headers = get_realistic_headers(include_scanner_header=True)
+        
         # Get the base page
-        response = requests.get(url, timeout=timeout, verify=False)
+        response = requests.get(url, headers=headers, timeout=timeout, verify=False)
         response.raise_for_status()
         
         # Analyze headers from the base page

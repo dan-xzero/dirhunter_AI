@@ -2134,14 +2134,8 @@ def detect_technologies(url: str, use_cache: bool = True, use_active_scan: bool 
         session.mount('http://', HTTPAdapter(max_retries=retries))
         session.mount('https://', HTTPAdapter(max_retries=retries))
         
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Cache-Control': 'max-age=0',
-        }
+        from utils.user_agent_manager import get_realistic_headers
+        headers = get_realistic_headers(include_scanner_header=True)
         
         response = session.get(url, headers=headers, timeout=10, verify=False)
         response.raise_for_status()
@@ -2181,33 +2175,7 @@ def detect_technologies(url: str, use_cache: bool = True, use_active_scan: bool 
             if original_count > filtered_count:
                 logging.info(f"Removed {original_count - filtered_count} likely false positives")
         
-        # Check for CVEs if any technologies are detected
-        if detected_techs:
-            try:
-                from utils.cve import check_components
-                
-                # Prepare components in the format needed for CVE checking
-                components = _prepare_for_cve_detection(detected_techs)
-                
-                if components:
-                    # Check for CVEs
-                    cve_results = check_components(components)
-                    
-                    if isinstance(cve_results, dict):
-                        # New format: {'total_vulns': X, 'details': {...}}
-                        total_vulns = cve_results.get('total_vulns', 0)
-                        details = cve_results.get('details', {})
-                        
-                        if total_vulns > 0:
-                            detected_techs["cve_vulns"] = total_vulns
-                            detected_techs["cve_details"] = details
-                    elif isinstance(cve_results, list) and cve_results:
-                        # Legacy format: list of CVEs
-                        detected_techs["cve_vulns"] = len(cve_results)
-                        detected_techs["cve_details"] = cve_results
-                    
-            except Exception as e:
-                logging.warning(f"Error checking CVEs: {e}")
+
         
         # Save to cache
         cache[url_hash] = detected_techs

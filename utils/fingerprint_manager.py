@@ -72,9 +72,7 @@ def detect_technologies_for_url(url: str, use_cache: bool = True) -> Dict[str, A
             logger.info(f"Detected {tech_count} technologies for {url} in {elapsed:.2f}s "
                        f"({version_count} with version info)")
             
-            # Log CVE information if available
-            if 'cve_vulns' in results and results['cve_vulns'] > 0:
-                logger.info(f"Found {results['cve_vulns']} potential vulnerabilities in {url}")
+
             
             return results
         
@@ -106,50 +104,4 @@ def detect_technologies_for_url(url: str, use_cache: bool = True) -> Dict[str, A
         logger.error(f"Error in tech fingerprint detector: {e}")
         return {}
 
-def check_cves_for_technologies(techs: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Check for CVEs in the detected technologies
-    
-    Args:
-        techs: Dictionary of detected technologies
-        
-    Returns:
-        Updated technologies dictionary with CVE information
-    """
-    if not techs or "cve_details" in techs:
-        return techs  # Already processed or no technologies
-    
-    try:
-        from utils.simple_tech_detector import _prepare_for_cve_detection
-        from utils.cve import check_components
-        
-        # Prepare components in the format needed for CVE checking
-        components = _prepare_for_cve_detection(techs)
-        
-        # Only proceed if we have components with versions
-        if components:
-            cve_results = check_components(components)
-            
-            if cve_results:
-                # Store the overall count
-                techs["cve_vulns"] = len(cve_results)
-                
-                # Organize by package
-                cve_details = {}
-                for cve in cve_results:
-                    pkg_name = cve.get("package", "").lower()
-                    if not pkg_name:
-                        continue
-                        
-                    if pkg_name not in cve_details:
-                        cve_details[pkg_name] = {"ids": [], "version": cve.get("version", "")}
-                        
-                    cve_id = cve.get("id", "")
-                    if cve_id and cve_id not in cve_details[pkg_name]["ids"]:
-                        cve_details[pkg_name]["ids"].append(cve_id)
-                
-                techs["cve_details"] = cve_details
-    except Exception as e:
-        logger.error(f"Error checking CVEs: {e}")
-    
-    return techs 
+ 

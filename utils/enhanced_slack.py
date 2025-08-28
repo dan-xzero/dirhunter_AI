@@ -7,8 +7,7 @@ from datetime import datetime
 from collections import defaultdict
 from typing import Dict, List, Any
 
-from utils.tech_helpers import aggregate_cves, severity_from_count
-from utils.enhanced_reporter import categorize_secret, SECRET_TYPES, TECH_LOGOS
+from utils.enhanced_reporter import categorize_secret, SECRET_TYPES
 
 REPORT_BASE_URL = os.getenv("REPORT_BASE_URL", "https://your-domain.com")
 
@@ -36,11 +35,8 @@ def send_enhanced_slack_alert(webhook_url: str, all_domains_data: Dict[str, List
         'status_counts': defaultdict(int),
         'category_counts': defaultdict(int),
         'secret_types': defaultdict(int),
-        'cve_severity': defaultdict(int),
-        'tech_stack': defaultdict(lambda: {'count': 0, 'domains': set()}),
         'critical_findings': [],
-        'domains_with_secrets': [],
-        'domains_with_cves': []
+        'domains_with_secrets': []
     }
     
     # Process each domain
@@ -49,8 +45,6 @@ def send_enhanced_slack_alert(webhook_url: str, all_domains_data: Dict[str, List
         domain_stats = {
             'new': 0, 'changed': 0, 'existing': 0,
             'secrets': defaultdict(int),
-            'cves': defaultdict(list),
-            'tech': defaultdict(set),
             'risk_score': 0
         }
         
@@ -75,23 +69,7 @@ def send_enhanced_slack_alert(webhook_url: str, all_domains_data: Dict[str, List
                 risk_multiplier = {'critical': 10, 'high': 5, 'medium': 2, 'low': 1}
                 domain_stats['risk_score'] += risk_multiplier.get(secret_info['risk'], 1)
             
-            # Technology
-            tech_dict = finding.get('tech') or {}
-            for tech_name, tech_info in tech_dict.items():
-                if tech_name not in ['cve_vulns', 'cve_details', 'name', 'version', 'wapp']:
-                    global_stats['tech_stack'][tech_name]['count'] += 1
-                    global_stats['tech_stack'][tech_name]['domains'].add(domain)
-                    if isinstance(tech_info, dict) and tech_info.get('version'):
-                        domain_stats['tech'][tech_name].add(tech_info['version'])
-            
-            # CVEs
-            if tech_dict.get('cve_details'):
-                for pkg, cves in tech_dict['cve_details'].items():
-                    domain_stats['cves'][pkg].extend(cves)
-                    cve_count = len(cves)
-                    severity = severity_from_count(cve_count)
-                    global_stats['cve_severity'][severity] += cve_count
-                    domain_stats['risk_score'] += {'Critical': 8, 'High': 4, 'Medium': 2, 'Low': 1}.get(severity, 1) * cve_count
+
             
             # Critical findings
             from utils.ai_analyzer import get_category_priority
@@ -108,8 +86,6 @@ def send_enhanced_slack_alert(webhook_url: str, all_domains_data: Dict[str, List
         
         if sum(domain_stats['secrets'].values()) > 0:
             global_stats['domains_with_secrets'].append(domain)
-        if sum(len(cves) for cves in domain_stats['cves'].values()) > 0:
-            global_stats['domains_with_cves'].append(domain)
     
     # Build Slack blocks
     blocks = []
@@ -211,32 +187,7 @@ def send_enhanced_slack_alert(webhook_url: str, all_domains_data: Dict[str, List
             }
         })
     
-    # Technology stack overview
-    if global_stats['tech_stack']:
-        blocks.append({"type": "divider"})
-        
-        # Sort by prevalence
-        top_tech = sorted(global_stats['tech_stack'].items(), key=lambda x: -x[1]['count'])[:8]
-        tech_grid = []
-        
-        for tech_name, info in top_tech:
-            icon = TECH_LOGOS.get(tech_name.lower(), '📦')
-            tech_grid.append(f"{icon} *{tech_name}*\n`{info['count']}` instances\n`{len(info['domains'])}` domains")
-        
-        # Create 2x4 grid
-        for i in range(0, len(tech_grid), 2):
-            fields = [{"type": "mrkdwn", "text": tech_grid[i]}]
-            if i + 1 < len(tech_grid):
-                fields.append({"type": "mrkdwn", "text": tech_grid[i + 1]})
-            
-            blocks.append({
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": "*🔧 Technology Stack*" if i == 0 else " "
-                },
-                "fields": fields
-            })
+
     
     # Domain details (compact)
     blocks.append({"type": "divider"})
@@ -258,8 +209,7 @@ def send_enhanced_slack_alert(webhook_url: str, all_domains_data: Dict[str, List
             summary_parts.append(f"🔄 {stats['changed']}")
         if sum(stats['secrets'].values()) > 0:
             summary_parts.append(f"🔑 {sum(stats['secrets'].values())}")
-        if sum(len(cves) for cves in stats['cves'].values()) > 0:
-            summary_parts.append(f"🩹 {sum(len(cves) for cves in stats['cves'].values())}")
+
         
         report_link = f"{REPORT_BASE_URL}/reports/{domain.replace('://', '_').replace('/', '_')}_tags.html"
         summary_parts.append(f"<{report_link}|View Report>")
@@ -280,7 +230,7 @@ def send_enhanced_slack_alert(webhook_url: str, all_domains_data: Dict[str, List
         "type": "section",
         "text": {
             "type": "mrkdwn",
-            "text": "*🎯 Next Steps*\n• Review critical findings immediately\n• Check domains with detected secrets\n• Update vulnerable components"
+            "text": "*🎯 Next Steps*\n• Review critical findings immediately\n• Check domains with detected secrets"
         },
         "accessory": {
             "type": "button",
