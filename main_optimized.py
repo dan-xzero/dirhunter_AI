@@ -39,6 +39,80 @@ except ImportError:
 
 from utils.fingerprint_manager import detect_technologies_for_url
 
+def send_chunked_slack_message(webhook_url, title, message, link=None, link_text=None):
+    """
+    Send a Slack message with automatic chunking for large messages
+    
+    Parameters:
+    - webhook_url: The Slack webhook URL
+    - title: The message title
+    - message: The message body (will be chunked if too large)
+    - link: Optional URL to include
+    - link_text: Text for the link button
+    """
+    if not webhook_url or webhook_url.lower() == "none":
+        return False
+    
+    # Split message into chunks if it's too long
+    max_chunk_size = 2000  # Leave buffer for Slack limits
+    
+    if len(message) <= max_chunk_size:
+        # Message is small enough, send as single message
+        from utils.slack_alert import send_simple_slack_message
+        return send_simple_slack_message(webhook_url, title, message, link, link_text)
+    
+    # Message is too large, split into chunks
+    print(f"[!] Message is large ({len(message)} chars), splitting into chunks...")
+    
+    # Split by double newlines to preserve formatting
+    message_parts = message.split("\n\n")
+    chunks = []
+    current_chunk = ""
+    
+    for part in message_parts:
+        # If adding this part would exceed chunk size, start a new chunk
+        if len(current_chunk) + len(part) + 2 > max_chunk_size:
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+            current_chunk = part
+        else:
+            if current_chunk:
+                current_chunk += "\n\n" + part
+            else:
+                current_chunk = part
+    
+    # Add the last chunk if it has content
+    if current_chunk.strip():
+        chunks.append(current_chunk.strip())
+    
+    # Send each chunk as a separate message
+    success = True
+    for i, chunk in enumerate(chunks):
+        chunk_title = f"{title} (Part {i+1}/{len(chunks)})" if len(chunks) > 1 else title
+        
+        # Only add link to the last chunk
+        chunk_link = link if i == len(chunks) - 1 else None
+        chunk_link_text = link_text if i == len(chunks) - 1 else None
+        
+        from utils.slack_alert import send_simple_slack_message
+        chunk_success = send_simple_slack_message(
+            webhook_url, 
+            chunk_title, 
+            chunk, 
+            chunk_link, 
+            chunk_link_text
+        )
+        
+        if not chunk_success:
+            success = False
+            print(f"[!] Failed to send chunk {i+1}/{len(chunks)}")
+        
+        # Small delay between chunks to avoid rate limiting
+        if i < len(chunks) - 1:
+            time.sleep(1)
+    
+    return success
+
 def capture_headers(url, timeout=10):
     """
     Capture response headers for a given URL
@@ -721,8 +795,7 @@ def main():
                 f"• Screenshot workers: {args.screenshot_workers}\n"
             )
             
-            from utils.slack_alert import send_simple_slack_message
-            send_simple_slack_message(
+            send_chunked_slack_message(
                 WEBHOOK_URL,
                 "DirHunter AI Scan Started",
                 start_message,
@@ -818,62 +891,43 @@ def main():
             # Sort categories by count
             sorted_categories = sorted(categories.items(), key=lambda x: x[1], reverse=True)[:5]
 
-            # Build Slack message
+            # Build concise Slack message focused on new findings
+            scan_timestamp = datetime.now().strftime("%b %d, %Y at %H:%M")
             completion_message = (
                 f":white_check_mark: *DirHunter AI Scan Completed*\n"
                 f"Scan completed for {total_domains} domain{'s' if total_domains > 1 else ''}\n"
-                f"• Total findings: {total_findings}\n"
                 f"• New findings: {new_findings}\n"
-                f"• Changed findings: {changed_findings}\n"
-                f"• Existing findings: {existing_findings}\n"
-                f"• Scan duration: {scan_duration:.2f} seconds\n\n"
-            )
-            
-            # Add security scan timestamp section
-            scan_timestamp = datetime.now().strftime("%b %d, %Y at %H:%M")
-            completion_message += (
-                f":mag: *Security Scan Complete - {scan_timestamp}*\n"
-                f":bar_chart: *Overall Statistics*\n"
-                f"• Domains scanned: {total_domains}\n"
                 f"• Total findings: {total_findings}\n"
+                f"• Scan duration: {scan_duration:.2f} seconds\n"
+                f"• Completed: {scan_timestamp}\n\n"
             )
             
-            # Add attention section if there are new findings
-            if new_findings > 0:
-                completion_message += (
-                    f":rotating_light: *Attention Required*\n"
-                    f"• :new: New findings: {new_findings}\n"
-                )
-            
-            # Add new findings section
+            # Add new findings section grouped by domain (this will be chunked if too large)
             if new_findings_list:
-                completion_message += f"\n:new: *New Findings (Not in Previous Scan)*\n"
+                completion_message += f":new: *New Findings Detected*\n\n"
                 
-                # Limit to 5 findings to keep message size reasonable
-                shown_findings = min(5, len(new_findings_list))
-                for i in range(shown_findings):
-                    finding = new_findings_list[i]
-                    completion_message += f"• {finding['domain']} - [{finding['tag']}]\n"
-                    completion_message += f" └─ {finding['url']}\n"
+                # Group findings by domain
+                domain_findings = {}
+                for finding in new_findings_list:
+                    domain = finding['domain']
+                    if domain not in domain_findings:
+                        domain_findings[domain] = []
+                    domain_findings[domain].append(finding)
                 
-                # Add note about remaining findings
-                if len(new_findings_list) > shown_findings:
-                    completion_message += f" ...and {len(new_findings_list) - shown_findings} more new findings\n"
-            
-            # Add domain breakdown
-            if len(domain_stats) > 0:
-                completion_message += "\n:globe_with_meridians: *Domain Breakdown*\n"
-                for domain in domain_stats:
-                    completion_message += f"{domain['domain']}\n"
-                    if domain['new'] > 0:
-                        completion_message += f" :bell: New: {domain['new']}\n"
-                    completion_message += f" :page_facing_up: View Detailed Report\n"
+                # Show findings grouped by domain
+                for domain, findings in domain_findings.items():
+                    completion_message += f"*Domain: {domain}*\n"
+                    for finding in findings:
+                        # Show the complete URL without AI labels
+                        url = finding['url']
+                        completion_message += f"• {url}\n"
+                    completion_message += "\n"  # Add spacing between domains
             
             # Add dashboard link
             completion_message += (
-                f":dart: *View Complete Security Dashboard*\n"
+                f"\n:dart: *View Complete Security Dashboard*\n"
                 f"Access detailed reports, screenshots, and analysis:\n"
-                f":stopwatch: Scan completed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC | :robot_face: Powered by DirHunter AI"
+                f":robot_face: Powered by DirHunter AI"
             )
             
             # Get dashboard URL
@@ -886,9 +940,9 @@ def main():
                 ip_address = socket.gethostbyname(hostname)
                 dashboard_url = f"http://{ip_address}/results/html/dashboard.html"
             
-            # Send the message
+            # Send the message with chunking support for large messages
             from utils.slack_alert import send_simple_slack_message
-            success = send_simple_slack_message(
+            success = send_chunked_slack_message(
                 WEBHOOK_URL,
                 "DirHunter AI Scan Completed",
                 completion_message,
@@ -911,7 +965,6 @@ def main():
         logger.info("No results found across all domains. Sending completion notification anyway.")
         # Send a simple completion message even when no results
         try:
-            from utils.slack_alert import send_simple_slack_message
             completion_message = (
                 f":white_check_mark: *DirHunter AI Scan Completed*\n"
                 f"Scan completed but no findings were detected.\n"
@@ -920,7 +973,7 @@ def main():
                 f"• :robot_face: Powered by DirHunter AI"
             )
             
-            success = send_simple_slack_message(
+            success = send_chunked_slack_message(
                 WEBHOOK_URL,
                 "DirHunter AI Scan Completed",
                 completion_message

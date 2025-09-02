@@ -390,18 +390,8 @@ def curl_fetch_hash(url: str):
             except Exception:
                 download_meta = None
 
-        # Tech fingerprinting (safe for text / small bodies)
+        # Tech fingerprinting disabled - no longer needed
         tech = None
-        if len(body_bytes) < 500_000:  # Only analyse reasonably small pages
-            try:
-                if detect_technology:
-                    tech = detect_technology(url)
-                else:
-                    tech = None
-
-
-            except Exception:
-                tech = None
 
         # VirusTotal look-up could be added here (skipped for performance)
         vt_result = None
