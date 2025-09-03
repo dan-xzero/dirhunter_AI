@@ -507,6 +507,128 @@ def create_dashboard(results, output_path=None, is_update=False):
         .quick-filters .btn[aria-expanded="true"] .fas.fa-chevron-down {
             transform: rotate(180deg);
         }
+        
+        /* Scan Overview Section Styles */
+        .scan-overview-section {
+            margin-bottom: 2rem;
+        }
+        .scan-overview-section .card {
+            border: none;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        .scan-overview-section .card-header {
+            border-bottom: none;
+            padding: 1.5rem;
+        }
+        .scan-overview-section .card-header h3 {
+            font-size: 1.5rem;
+            font-weight: 600;
+        }
+        .scan-overview-section .card-body {
+            padding: 1.5rem;
+        }
+        .new-findings-overview h5 {
+            font-weight: 600;
+            border-bottom: 2px solid #28a745;
+            padding-bottom: 0.5rem;
+        }
+        .new-findings-grid {
+            display: grid;
+            gap: 1.5rem;
+        }
+        .domain-new-findings {
+            background-color: #f8f9fa;
+            border-radius: 8px;
+            padding: 1rem;
+            border-left: 4px solid #28a745;
+        }
+        .domain-name {
+            font-weight: 600;
+            margin-bottom: 1rem;
+        }
+        .findings-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+        .finding-item {
+            background-color: white;
+            border-radius: 6px;
+            padding: 0.75rem;
+            border: 1px solid #e9ecef;
+            transition: all 0.2s ease;
+        }
+        .finding-item:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+            border-color: #007bff;
+        }
+        .finding-link {
+            color: #495057;
+            text-decoration: none;
+            display: flex;
+            align-items: center;
+            font-size: 0.9rem;
+            font-weight: 500;
+        }
+        .finding-link:hover {
+            color: #007bff;
+            text-decoration: none;
+        }
+        .finding-link i {
+            color: #6c757d;
+            font-size: 0.8rem;
+        }
+        
+        /* Overview Statistics Styles */
+        .overview-stats {
+            background-color: #f8f9fa;
+            border-radius: 10px;
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+        }
+        .stat-card {
+            padding: 1.5rem;
+            border-radius: 8px;
+            background-color: white;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            transition: transform 0.2s ease;
+        }
+        .stat-card:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        }
+        .stat-number {
+            font-size: 2.5rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+        }
+        .stat-label {
+            font-size: 0.9rem;
+            color: #6c757d;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-weight: 500;
+        }
+        .new-stat .stat-number {
+            color: #28a745;
+        }
+        
+        /* No Changes Message Styles */
+        .no-changes-message {
+            padding: 2rem;
+        }
+        .no-changes-message i {
+            margin-bottom: 1rem;
+        }
+        .no-changes-message h5 {
+            margin-bottom: 1rem;
+            font-weight: 600;
+        }
+        .no-changes-message p {
+            font-size: 1.1rem;
+            line-height: 1.6;
+        }
         </style>
     </head>
     <body>
@@ -549,9 +671,124 @@ def create_dashboard(results, output_path=None, is_update=False):
         all_tags = set()
         all_techs = set()
         all_domain_techs = {}
-
         
+        # Collect all new findings across all domains for overview
+        all_new_findings = []
+        all_changed_findings = []
+        all_existing_findings = []
+        
+                # First pass: collect all findings by status
+        for domain, findings in results.items():
+            if not findings:
+                continue
+            for finding in findings:
+                status = finding.get('finding_status', 'existing')
+                if status == 'new':
+                    all_new_findings.append({'domain': domain, 'finding': finding})
+                elif status == 'changed':
+                    all_changed_findings.append({'domain': domain, 'finding': finding})
+                elif status == 'existing':
+                    all_existing_findings.append({'domain': domain, 'finding': finding})
+        
+        # Add Scan Overview Section
+        if all_new_findings:
+            f_handle.write("""
+            <!-- Scan Overview Section -->
+            <div class="scan-overview-section mb-4">
+                <div class="card">
+                    <div class="card-header bg-primary text-white">
+                        <h3 class="mb-0"><i class="fas fa-chart-line me-2"></i>Scan Overview - New Findings</h3>
+                    </div>
+                    <div class="card-body">
+                        <!-- Overview Statistics -->
+                        <div class="overview-stats mb-4">
+                            <div class="row text-center">
+                                <div class="col-md-12">
+                                    <div class="stat-card new-stat">
+                                        <div class="stat-number">{len(all_new_findings)}</div>
+                                        <div class="stat-label">New Findings</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+            """)
+            
+            # Show new findings overview
+            if all_new_findings:
+                f_handle.write(f"""
+                        <div class="new-findings-overview mb-4">
+                            <h5 class="text-success mb-3">
+                                <i class="fas fa-plus-circle me-2"></i>New Findings ({len(all_new_findings)})
+                            </h5>
+                            <div class="new-findings-grid">
+                """)
+                
+                # Group new findings by domain
+                new_by_domain = {}
+                for item in all_new_findings:
+                    domain = item['domain']
+                    if domain not in new_by_domain:
+                        new_by_domain[domain] = []
+                    new_by_domain[domain].append(item['finding'])
+                
+                for domain, findings in new_by_domain.items():
+                    f_handle.write(f"""
+                                <div class="domain-new-findings mb-3">
+                                    <h6 class="domain-name text-primary mb-2">
+                                        <i class="fas fa-globe me-2"></i>{domain}
+                                    </h6>
+                                    <div class="findings-list">
+                    """)
+                    
+                    for finding in findings:
+                        url = finding.get('url', '')
+                        path = finding.get('path', '/')
+                        if not path or path == 'unknown':
+                            path = '/'
+                        f_handle.write(f"""
+                                        <div class="finding-item">
+                                            <a href="{url}" target="_blank" class="finding-link">
+                                                <i class="fas fa-external-link-alt me-2"></i>{path}
+                                            </a>
+                                        </div>
+                        """)
+                    
+                    f_handle.write("""
+                                    </div>
+                                </div>
+                    """)
+                
+                f_handle.write("""
+                            </div>
+                        </div>
+                """)
+            
 
+            
+            f_handle.write("""
+                    </div>
+                </div>
+            </div>
+            """)
+        else:
+            # No new or changed findings
+            f_handle.write("""
+            <!-- Scan Overview Section -->
+            <div class="scan-overview-section mb-4">
+                <div class="card">
+                    <div class="card-header bg-success text-white">
+                        <h3 class="mb-0"><i class="fas fa-check-circle me-2"></i>Scan Overview - No Changes Detected</h3>
+                    </div>
+                    <div class="card-body text-center">
+                        <div class="no-changes-message">
+                            <i class="fas fa-shield-check fa-3x text-success mb-3"></i>
+                            <h5 class="text-success">Great News!</h5>
+                            <p class="text-muted">No new findings or changes were detected in this scan. All domains appear to be secure.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            """)
         
         # Get current timestamp
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
