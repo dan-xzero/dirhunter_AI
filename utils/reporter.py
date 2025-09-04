@@ -532,6 +532,22 @@ def create_dashboard(results, output_path=None, is_update=False):
             border-bottom: 2px solid #28a745;
             padding-bottom: 0.5rem;
         }
+        .new-findings-overview .btn-link {
+            font-size: 1.1rem;
+            font-weight: 600;
+        }
+        .new-findings-overview .btn-link:hover {
+            text-decoration: none !important;
+        }
+        .new-findings-overview .btn-link i {
+            transition: transform 0.3s ease;
+        }
+        .new-findings-overview .btn-link[aria-expanded="true"] i {
+            transform: rotate(180deg);
+        }
+        .new-findings-overview .collapse {
+            transition: all 0.3s ease;
+        }
         .new-findings-grid {
             display: grid;
             gap: 1.5rem;
@@ -718,9 +734,12 @@ def create_dashboard(results, output_path=None, is_update=False):
                 f_handle.write(f"""
                         <div class="new-findings-overview mb-4">
                             <h5 class="text-success mb-3">
-                                <i class="fas fa-plus-circle me-2"></i>New Findings ({len(all_new_findings)})
+                                <button class="btn btn-link text-success p-0 text-decoration-none" type="button" data-bs-toggle="collapse" data-bs-target="#newFindingsCollapse" aria-expanded="false" aria-controls="newFindingsCollapse">
+                                    <i class="fas fa-chevron-down me-2"></i>New Findings ({len(all_new_findings)})
+                                </button>
                             </h5>
-                            <div class="new-findings-grid">
+                            <div class="collapse" id="newFindingsCollapse">
+                                <div class="new-findings-grid">
                 """)
                 
                 # Group new findings by domain
@@ -759,6 +778,7 @@ def create_dashboard(results, output_path=None, is_update=False):
                     """)
                 
                 f_handle.write("""
+                                </div>
                             </div>
                         </div>
                 """)
@@ -845,24 +865,24 @@ def create_dashboard(results, output_path=None, is_update=False):
                     <div class="status-indicator">
                         <div class="status-count">
                             <a href="{safe_domain}_findings.html?status=new" class="status-link">
-                                <span class="status-count-value status-new">{new_count}</span>
-                                <small>New</small>
+                            <span class="status-count-value status-new">{new_count}</span>
+                            <small>New</small>
                             </a>
-                        </div>
+                            </div>
                         <div class="status-count">
                             <a href="{safe_domain}_findings.html?status=changed" class="status-link">
-                                <span class="status-count-value status-changed">{changed_count}</span>
-                                <small>Changed</small>
+                            <span class="status-count-value status-changed">{changed_count}</span>
+                            <small>Changed</small>
                             </a>
-                        </div>
+                            </div>
                         <div class="status-count">
                             <a href="{safe_domain}_findings.html?status=existing" class="status-link">
-                                <span class="status-count-value status-existing">{existing_count}</span>
-                                <small>Existing</small>
+                            <span class="status-count-value status-existing">{existing_count}</span>
+                            <small>Existing</small>
                             </a>
+                            </div>
                         </div>
-                    </div>
-                    
+                        
                     <!-- Quick Filter Dropdowns -->
                     <div class="quick-filters mt-3">
                         <div class="row">
@@ -873,9 +893,9 @@ def create_dashboard(results, output_path=None, is_update=False):
                                 <div class="collapse mt-2" id="new-urls-{safe_domain}">
                                     <div class="card card-body p-2" style="max-height: 200px; overflow-y: auto;">
                                         {(''.join([f'<div class="mb-1"><small><a href="{f.get("url", "#")}" target="_blank" class="text-decoration-none">{f.get("url", "N/A")}</a></small></div>' for f in findings if f.get("finding_status") == "new"]))}
-                                    </div>
-                                </div>
-                            </div>
+                        </div>
+                    </div>
+                </div>
                             <div class="col-md-4">
                                 <button class="btn btn-outline-warning btn-sm w-100" type="button" data-bs-toggle="collapse" data-bs-target="#changed-urls-{safe_domain}" aria-expanded="false">
                                     <i class="fas fa-chevron-down me-2"></i>Changed URLs ({changed_count})
@@ -883,17 +903,17 @@ def create_dashboard(results, output_path=None, is_update=False):
                                 <div class="collapse mt-2" id="changed-urls-{safe_domain}">
                                     <div class="card card-body p-2" style="max-height: 200px; overflow-y: auto;">
                                         {(''.join([f'<div class="mb-1"><small><a href="{f.get("url", "#")}" target="_blank" class="text-decoration-none">{f.get("url", "N/A")}</a></small></div>' for f in findings if f.get("finding_status") == "changed"]))}
-                                    </div>
+            </div>
                                 </div>
                             </div>
                             <div class="col-md-4">
                                 <button class="btn btn-outline-secondary btn-sm w-100" type="button" data-bs-toggle="collapse" data-bs-target="#existing-urls-{safe_domain}" aria-expanded="false">
                                     <i class="fas fa-chevron-down me-2"></i>Existing URLs ({existing_count})
-                                </button>
+                </button>
                                 <div class="collapse mt-2" id="existing-urls-{safe_domain}">
                                     <div class="card card-body p-2" style="max-height: 200px; overflow-y: auto;">
                                         {(''.join([f'<div class="mb-1"><small><a href="{f.get("url", "#")}" target="_blank" class="text-decoration-none">{f.get("url", "N/A")}</a></small></div>' for f in findings if f.get("finding_status") == "existing"]))}
-                                    </div>
+                            </div>
                                 </div>
                             </div>
                         </div>
@@ -967,7 +987,7 @@ def create_dashboard(results, output_path=None, is_update=False):
                     }.get(header['importance'], 'secondary')
                     
                     f_handle.write(f'<div class="mb-1"><span class="badge bg-{badge_class}">{header["name"]}</span></div>')
-                
+                    
                 f_handle.write('</div></div>')
             
             # Add tags
@@ -1095,7 +1115,7 @@ def create_dashboard(results, output_path=None, is_update=False):
             tagFilter.addEventListener('change', applyFilters);
 
             
-                                resetFilters.addEventListener('click', function() {{
+                resetFilters.addEventListener('click', function() {{
                 domainFilter.value = '';
                 statusFilter.value = 'all';
                 tagFilter.value = 'all';
@@ -1161,7 +1181,7 @@ def export_tag_based_reports(domain, findings, output_dir=HTML_REPORT_DIR):
     for f in findings:
         if f is None:
             continue
-            
+        
         # Count secrets
         dm = f.get('download_meta', {})
         if dm:
@@ -1449,7 +1469,7 @@ def export_tag_based_reports(domain, findings, output_dir=HTML_REPORT_DIR):
 
     # Ensure the directory exists
     os.makedirs(os.path.dirname(tag_index_file), exist_ok=True)
-    
+
     with open(tag_index_file, "w") as f:
         f.write(html)
 
