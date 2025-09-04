@@ -708,7 +708,7 @@ def create_dashboard(results, output_path=None, is_update=False):
         
         # Add Scan Overview Section
         if all_new_findings:
-            f_handle.write("""
+            f_handle.write(f"""
             <!-- Scan Overview Section -->
             <div class="scan-overview-section mb-4">
                 <div class="card">
