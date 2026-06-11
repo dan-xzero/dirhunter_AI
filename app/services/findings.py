@@ -11,7 +11,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.db import SessionLocal
+from app.db import SessionLocal, engine
 from app.models import (
     AuditLog,
     CVE,
@@ -31,10 +31,20 @@ logger = logging.getLogger(__name__)
 
 
 def _run_sync(coro):
+    async def _run_with_fresh_pool():
+        # Scanner subprocesses can inherit async engine state from a parent loop.
+        # Drop inherited pool connections before/after sync wrappers to avoid
+        # "Future attached to a different loop" during partial persistence.
+        await engine.dispose(close=False)
+        try:
+            return await coro
+        finally:
+            await engine.dispose()
+
     try:
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(coro)
+        return asyncio.run(_run_with_fresh_pool())
     raise RuntimeError("Synchronous wrapper cannot run inside an active event loop")
 
 
