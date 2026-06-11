@@ -1,0 +1,12 @@
+[Unit]
+Description=Run DirHunter Portal Auto-Heal Watchdog Periodically
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=20s
+Persistent=true
+Unit=dirhunter-portal-watchdog.service
+
+[Install]
+WantedBy=timers.target

@@ -21,10 +21,11 @@ export default function ScanPage() {
 
   const breakdown = scan.data?.status_breakdown;
   const rawTotal = scan.data ? (breakdown ? breakdown.new + breakdown.recurring + breakdown.changed : 0) : undefined;
+  const urlsScanned = typeof scan.data?.stats?.urls_scanned === "number" ? scan.data.stats.urls_scanned : 0;
 
   return (
     <main id="main-content" className="space-y-5">
-      <section className="grid gap-4 md:grid-cols-4">
+      <section className="grid gap-4 md:grid-cols-5">
         <StatCard
           label="Scan"
           value={`#${params.id}`}
@@ -45,6 +46,13 @@ export default function ScanPage() {
           detail="Likely false positives kept for audit"
           loading={suppressed.isLoading}
           error={suppressed.isError}
+        />
+        <StatCard
+          label="URLs Scanned"
+          value={urlsScanned}
+          detail="Wordlist candidates attempted"
+          loading={scan.isLoading}
+          error={scan.isError}
         />
         <StatCard
           label="Raw Findings"

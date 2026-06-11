@@ -105,7 +105,13 @@ async def run_scan_domain(
             await _send_slack_digest_if_enabled(scan_id)
         raise RuntimeError(f"scan {scan_id} domain {domain} failed with exit code {code}")
 
-    final_status = await _mark_domain(scan_id, domain, "completed", pid=pid)
+    final_status = await _mark_domain(
+        scan_id,
+        domain,
+        "completed",
+        pid=pid,
+        urls_scanned=_count_wordlist_urls(wordlist),
+    )
     if final_status == "completed":
         await _send_slack_digest_if_enabled(scan_id)
 
@@ -199,6 +205,7 @@ async def _mark_domain(
     *,
     error: str | None = None,
     pid: int | None = None,
+    urls_scanned: int | None = None,
 ) -> str | None:
     async with SessionLocal() as session:
         scan = await session.get(Scan, scan_id)
@@ -209,10 +216,13 @@ async def _mark_domain(
         domain_status = dict(stats.get("domain_status") or {})
         domain_errors = dict(stats.get("domain_errors") or {})
         domain_attempts = dict(stats.get("domain_attempts") or {})
+        domain_urls_scanned = dict(stats.get("domain_urls_scanned") or {})
         if status == "running":
             domain_attempts[domain] = int(domain_attempts.get(domain) or 0) + 1
 
         domain_status[domain] = status
+        if urls_scanned is not None:
+            domain_urls_scanned[domain] = int(urls_scanned)
         if error:
             domain_errors[domain] = error
 
@@ -221,11 +231,13 @@ async def _mark_domain(
         failed = sum(1 for value in domain_status.values() if value == "failed")
         running_domains = [name for name, value in domain_status.items() if value == "running"]
         counts = await _scan_counts(session, scan_id)
+        urls_scanned_total = sum(int(value or 0) for value in domain_urls_scanned.values())
 
         stats.update(
             {
                 **counts,
                 "domains": total_domains,
+                "urls_scanned": urls_scanned_total,
                 "domains_total": total_domains,
                 "domains_completed": completed,
                 "domains_failed": failed,
@@ -233,6 +245,7 @@ async def _mark_domain(
                 "domain_status": domain_status,
                 "domain_errors": domain_errors,
                 "domain_attempts": domain_attempts,
+                "domain_urls_scanned": domain_urls_scanned,
                 "active_domain": domain if status == "running" else (running_domains[0] if running_domains else None),
                 "active_domains": running_domains,
                 "last_domain": domain,
@@ -316,6 +329,16 @@ def _split_domains(domains: str | None) -> list[str]:
     if len(domains) < 240 and path.exists() and path.is_file():
         return [line.strip() for line in path.read_text(errors="ignore").splitlines() if line.strip() and not line.startswith("#")]
     return [domain.strip() for domain in domains.split(",") if domain.strip()]
+
+
+def _count_wordlist_urls(wordlist: str | None) -> int:
+    if not wordlist:
+        return 0
+    try:
+        with open(wordlist, "r", encoding="utf-8", errors="ignore") as handle:
+            return sum(1 for line in handle if line.strip())
+    except OSError:
+        return 0
 
 
 def _utcnow_iso() -> str:

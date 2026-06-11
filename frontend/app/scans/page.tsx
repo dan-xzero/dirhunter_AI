@@ -56,6 +56,7 @@ function ScanCard({ scan }: { scan: Scan }) {
   const breakdown = scan.status_breakdown ?? emptyStatusBreakdown();
   const started = new Date(scan.started_at).toLocaleString();
   const finished = scan.finished_at ? new Date(scan.finished_at).toLocaleString() : "Still running";
+  const urlsScanned = typeof scan.stats?.urls_scanned === "number" ? scan.stats.urls_scanned : 0;
 
   return (
     <Link
@@ -78,6 +79,7 @@ function ScanCard({ scan }: { scan: Scan }) {
       </div>
 
       <div className="flex flex-wrap items-center gap-3">
+        <CountPill label="URLs" value={urlsScanned} />
         <CountPill label="Raw New" value={breakdown.new} />
         <CountPill label="Raw Recurring" value={breakdown.recurring} />
         <CountPill label="Raw Changed" value={breakdown.changed} />

@@ -21,9 +21,11 @@ install -m 0644 "$REPO_ROOT/deploy/dirhunter-slack.service" /etc/systemd/system/
 install -m 0644 "$REPO_ROOT/deploy/dirhunter-ui.service" /etc/systemd/system/dirhunter-ui.service
 install -m 0644 "$REPO_ROOT/deploy/dirhunter-scan-watchdog.service" /etc/systemd/system/dirhunter-scan-watchdog.service
 install -m 0644 "$REPO_ROOT/deploy/dirhunter-scan-watchdog.timer" /etc/systemd/system/dirhunter-scan-watchdog.timer
+install -m 0644 "$REPO_ROOT/deploy/dirhunter-portal-watchdog.service" /etc/systemd/system/dirhunter-portal-watchdog.service
+install -m 0644 "$REPO_ROOT/deploy/dirhunter-portal-watchdog.timer" /etc/systemd/system/dirhunter-portal-watchdog.timer
 install -m 0644 "$REPO_ROOT/deploy/logrotate/dirhunter" /etc/logrotate.d/dirhunter
 
 systemctl daemon-reload
-systemctl enable dirhunter-api dirhunter-worker dirhunter-slack dirhunter-ui dirhunter-scan-watchdog.timer
+systemctl enable dirhunter-api dirhunter-worker dirhunter-slack dirhunter-ui dirhunter-scan-watchdog.timer dirhunter-portal-watchdog.timer
 
 echo "Installed DirHunter services. Edit $ENV_DIR/dirhunter.env before starting them."

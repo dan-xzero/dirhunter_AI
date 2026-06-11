@@ -175,6 +175,27 @@ def finding_path_priority(entry):
     return (5, len(path), path)
 
 
+def count_wordlist_urls(wordlist):
+    """Count URL candidates ffuf will attempt for a single domain."""
+    try:
+        with open(wordlist, "r", encoding="utf-8", errors="ignore") as handle:
+            return sum(1 for line in handle if line.strip())
+    except OSError:
+        return 0
+
+
+def summarize_scan_metrics(perf_data, domains_with_wordlists):
+    domain_urls_scanned = {}
+    for domain, wordlist in domains_with_wordlists:
+        metrics = (perf_data or {}).get(domain) or {}
+        domain_urls_scanned[domain] = int(metrics.get("urls_scanned") or count_wordlist_urls(wordlist))
+
+    return {
+        "urls_scanned": sum(domain_urls_scanned.values()),
+        "domain_urls_scanned": domain_urls_scanned,
+    }
+
+
 load_dotenv(override=True)
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
@@ -331,7 +352,7 @@ def process_domain_optimized(domain, wordlist, ignore_hash, screenshot_workers, 
         fast_filter: Use fast filtering
     """
     start_time = time.time()
-    perf_metrics = {}
+    perf_metrics = {"urls_scanned": count_wordlist_urls(wordlist)}
     
     # Clean up any browser processes at the start of each domain
     aggressive_browser_cleanup()
@@ -649,11 +670,11 @@ def process_domains_parallel(domains_with_wordlists, args, shared_results):
                 try:
                     findings, metrics = future.result()
                     
-                    # Store results
+                    # Store results and metrics even when no findings survive filtering.
+                    perf_data[domain] = metrics or {}
                     if findings:
                         results[domain] = findings
                         shared_results.update(domain, findings)
-                        perf_data[domain] = metrics
                     
                     # Update dashboard periodically
                     completed += 1
@@ -912,7 +933,11 @@ def main():
 
     if USE_PG and pg_scan_id:
         try:
-            from app.services.findings import persist_batch_sync, persist_and_complete_scan_sync
+            from app.services.findings import persist_batch_sync, persist_and_complete_scan_sync, update_scan_state_sync
+
+            scan_metric_stats = summarize_scan_metrics(perf_data, domains_with_wordlists)
+            if scan_metric_stats:
+                update_scan_state_sync(pg_scan_id, stats=scan_metric_stats)
 
             if partial_pg_scan:
                 pg_stats = persist_batch_sync(pg_scan_id, results or {})

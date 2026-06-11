@@ -50,6 +50,7 @@ async def send_digest(scan_id: int, webhook_url: str | None = None) -> bool:
     if not scan:
         return False
 
+    urls_scanned = int((scan.stats or {}).get("urls_scanned") or 0)
     critical = [
         item
         for item in findings
@@ -75,9 +76,22 @@ async def send_digest(scan_id: int, webhook_url: str | None = None) -> bool:
             "fields": [
                 {"type": "mrkdwn", "text": f"*Status*\n`{scan.status}`"},
                 {"type": "mrkdwn", "text": f"*Findings*\n`{len(findings)}`"},
+                {"type": "mrkdwn", "text": f"*URLs scanned*\n`{urls_scanned}`"},
                 {"type": "mrkdwn", "text": f"*Critical*\n`{len(critical)}`"},
                 {"type": "mrkdwn", "text": f"*Needs triage*\n`{len(needs_triage)}`"},
             ],
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"*Links*\n"
+                    f"Scan: <{settings.effective_portal_url}/scans/{scan.id}|open scan>\n"
+                    f"Dashboard: <{settings.effective_portal_url}|open dashboard>\n"
+                    f"Findings queue: <{settings.effective_portal_url}/findings|open findings>"
+                ),
+            },
         },
     ]
 
@@ -94,20 +108,6 @@ async def send_digest(scan_id: int, webhook_url: str | None = None) -> bool:
             ],
         }
     )
-    blocks.append(
-        {
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Open scan"},
-                    "url": f"{settings.effective_portal_url}/scans/{scan.id}",
-                    "style": "primary",
-                }
-            ],
-        }
-    )
-
     response = requests.post(
         webhook,
         json={
@@ -129,32 +129,18 @@ def _section(title: str, findings: list[Finding]) -> list[dict[str, Any]]:
     for finding in findings:
         domain = finding.domain.host if finding.domain else "unknown"
         confidence = f"{round((finding.validation.llm_confidence if finding.validation else 0) * 100)}%"
+        portal_url = f"{settings.effective_portal_url}/findings?finding={finding.id}"
         blocks.append(
             {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"*{domain}* · `{finding.ai_tag}` · `{finding.finding_status}` · `{confidence}`\n{finding.url}",
+                    "text": (
+                        f"*{domain}* · `{finding.ai_tag}` · `{finding.finding_status}` · `{confidence}`\n"
+                        f"Evidence: {finding.url}\n"
+                        f"Portal: <{portal_url}|open finding>"
+                    ),
                 },
-                "accessory": {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Open"},
-                    "url": f"{settings.effective_portal_url}/findings?finding={finding.id}",
-                },
-            }
-        )
-        blocks.append(
-            {
-                "type": "actions",
-                "elements": [
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "Mark FP"},
-                        "style": "danger",
-                        "value": f"mark_fp:{finding.id}",
-                        "action_id": "mark_fp",
-                    }
-                ],
             }
         )
     return blocks
