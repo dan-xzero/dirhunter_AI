@@ -1,0 +1,12 @@
+[Unit]
+Description=DirHunter Scan Resume Watchdog
+After=network-online.target postgresql.service redis-server.service dirhunter-worker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/dirhunter_AI
+EnvironmentFile=/etc/dirhunter/dirhunter.env
+Environment=PATH=/root/go/bin:/opt/dirhunter_AI/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/opt/dirhunter_AI/dirscan/bin/python scripts/scan_watchdog.py --once
+User=root

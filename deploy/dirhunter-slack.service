@@ -1,0 +1,16 @@
+[Unit]
+Description=DirHunter Slack Command Service
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/dirhunter_AI
+EnvironmentFile=/etc/dirhunter/dirhunter.env
+ExecStart=/opt/dirhunter_AI/dirscan/bin/python slack_dirscan_app.py
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target

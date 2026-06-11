@@ -1,0 +1,17 @@
+[Unit]
+Description=DirHunter Scan Worker
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/dirhunter_AI
+EnvironmentFile=/etc/dirhunter/dirhunter.env
+Environment=PATH=/root/go/bin:/opt/dirhunter_AI/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/opt/dirhunter_AI/dirscan/bin/arq app.services.scan_runner.WorkerSettings
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target

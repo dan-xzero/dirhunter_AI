@@ -7,6 +7,7 @@ from PIL import Image
 from dotenv import load_dotenv
 import json
 import logging
+from config import OPENAI_MODEL_VISION
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -16,9 +17,10 @@ api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
     logger.warning("OPENAI_API_KEY not found in environment - AI analysis features will be disabled")
     OPENAI_AVAILABLE = False
+    client = None
 else:
     OPENAI_AVAILABLE = True
-client = OpenAI(api_key=api_key)
+    client = OpenAI(api_key=api_key, timeout=45.0)
 
 # Enhanced categories with priority levels
 CATEGORY_PRIORITY = {
@@ -91,7 +93,7 @@ def classify_screenshot_with_gpt(screenshot_path, url_context=None, page_text=No
         )
 
         response = client.chat.completions.create(
-            model="gpt-4o-mini",  # Using latest vision model
+            model=OPENAI_MODEL_VISION,
             messages=[
                 {
                     "role": "user",
@@ -101,8 +103,7 @@ def classify_screenshot_with_gpt(screenshot_path, url_context=None, page_text=No
                     ]
                 }
             ],
-            max_tokens=30,
-            temperature=0  # Deterministic classification
+            max_completion_tokens=30,
         )
 
         message_content = response.choices[0].message.content

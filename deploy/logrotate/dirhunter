@@ -1,0 +1,19 @@
+/opt/dirhunter_AI/cron.log
+/opt/dirhunter_AI/dirhunter_ai.log
+{
+    weekly
+    rotate 8
+    compress
+    missingok
+    notifempty
+    copytruncate
+}
+
+/opt/dirhunter_AI/logs/*.txt
+{
+    weekly
+    rotate 8
+    compress
+    missingok
+    notifempty
+}

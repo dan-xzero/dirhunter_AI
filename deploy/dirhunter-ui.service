@@ -1,0 +1,17 @@
+[Unit]
+Description=DirHunter Portal UI
+After=network-online.target dirhunter-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/dirhunter_AI/frontend
+EnvironmentFile=/etc/dirhunter/dirhunter.env
+Environment=PORT=3000
+ExecStart=/usr/bin/npm run start
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target

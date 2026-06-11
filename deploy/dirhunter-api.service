@@ -1,0 +1,16 @@
+[Unit]
+Description=DirHunter API
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/dirhunter_AI
+EnvironmentFile=/etc/dirhunter/dirhunter.env
+ExecStart=/opt/dirhunter_AI/dirscan/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target

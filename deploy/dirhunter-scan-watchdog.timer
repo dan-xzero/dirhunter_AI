@@ -1,0 +1,12 @@
+[Unit]
+Description=Run DirHunter Scan Resume Watchdog Periodically
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=true
+Unit=dirhunter-scan-watchdog.service
+
+[Install]
+WantedBy=timers.target

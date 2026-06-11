@@ -11,6 +11,11 @@ import tempfile
 import shutil
 from typing import Dict, List, Optional, Tuple, Callable
 
+try:
+    from config import KILL_BROWSER_SESSIONS
+except ImportError:
+    KILL_BROWSER_SESSIONS = True
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -178,6 +183,10 @@ class ResourceManager:
         Returns:
             int: Number of processes killed
         """
+        if not KILL_BROWSER_SESSIONS:
+            logger.info("Skipping browser process termination because DIRHUNTER_KILL_BROWSER_SESSIONS is disabled")
+            return 0
+
         if not PSUTIL_AVAILABLE:
             return 0
             

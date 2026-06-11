@@ -25,8 +25,16 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # Configure logging
 logger = logging.getLogger(__name__)
 
+try:
+    from config import KILL_BROWSER_SESSIONS
+except ImportError:
+    KILL_BROWSER_SESSIONS = True
+
 # Register aggressive cleanup to run on script exit
 def _aggressive_browser_cleanup():
+    if not KILL_BROWSER_SESSIONS:
+        return
+
     try:
         # Force kill ALL browser processes with SIGKILL
         subprocess.run(
@@ -86,7 +94,7 @@ _BEST_SCREENSHOT_METHOD = None
 _FIRST_URL_PROCESSED = False
 
 # Clean up any leftover browser processes at module import time
-if resource_manager:
+if resource_manager and KILL_BROWSER_SESSIONS:
     try:
         resource_manager.kill_browser_processes()
         resource_manager.clean_temporary_dirs()
@@ -118,6 +126,10 @@ def initialize_screenshot_system(max_workers=1):
     
 def clean_browser_environment():
     """Clean up browser environment before starting - aggressive version"""
+    if not KILL_BROWSER_SESSIONS:
+        logger.info("Skipping aggressive browser cleanup because DIRHUNTER_KILL_BROWSER_SESSIONS is disabled")
+        return
+
     logger.info("Performing aggressive browser cleanup...")
     
     try:
@@ -317,11 +329,13 @@ export DBUS_SESSION_BUS_ADDRESS="unix:path=/dev/null"
     --disable-extensions --disable-sync --disable-translate \\
     --hide-scrollbars --metrics-recording-only --mute-audio \\
     --no-first-run --safebrowsing-disable-auto-update \\
+    --window-size=1365,768 --timeout=12000 --virtual-time-budget=12000 \\
     --screenshot="{output_path}" "{url}" 
 
 # Save page content
 "{chrome_binary}" --headless=new --disable-gpu --no-sandbox \\
     --disable-extensions --disable-dev-shm-usage \\
+    --timeout=12000 --virtual-time-budget=12000 \\
     --dump-dom "{url}" > "{os.path.splitext(output_path)[0]}.txt" 2>/dev/null
 """)
             
@@ -363,7 +377,7 @@ export DBUS_SESSION_BUS_ADDRESS="unix:path=/dev/null"
         script_path = script.name
         script.write(f"""#!/bin/bash
 # Start Xvfb
-Xvfb :{display_num} -screen 0 1280x1024x24 -ac &
+Xvfb :{display_num} -screen 0 1365x768x24 -ac &
 XVFB_PID=$!
 
 # Wait for Xvfb
@@ -392,11 +406,13 @@ if [ -n "$BROWSER" ]; then
         --disable-extensions --disable-sync --disable-translate \\
         --hide-scrollbars --metrics-recording-only --mute-audio \\
         --no-first-run --safebrowsing-disable-auto-update \\
+        --window-size=1365,768 --timeout=12000 --virtual-time-budget=12000 \\
         --screenshot="{output_path}" "{url}" 
     
     # Save page content
     $BROWSER --headless=new --disable-gpu --no-sandbox \\
         --disable-extensions --disable-dev-shm-usage \\
+        --timeout=12000 --virtual-time-budget=12000 \\
         --dump-dom "{url}" > "{os.path.splitext(output_path)[0]}.txt" 2>/dev/null
 fi
 
@@ -495,13 +511,15 @@ def take_screenshot(url, output_path, priority="normal"):
         logger.info(f"Tier 3 failed, using Tier 4: Fallback image generation for {url}")
         success = create_fallback_screenshot(url, output_path)
         if success:
-            _BEST_SCREENSHOT_METHOD = "fallback"
-            logger.info(f"✓ Fallback image generation successful - will use for subsequent URLs")
+            _BEST_SCREENSHOT_METHOD = None
+            _FIRST_URL_PROCESSED = False
+            logger.info("✓ Fallback image generated for this URL only; real screenshot methods will be retried for the next URL")
             return True
             
         # If everything failed, we have no best method
         logger.error(f"All screenshot methods failed for {url}")
-        _BEST_SCREENSHOT_METHOD = "fallback"  # Default to fallback as last resort
+        _BEST_SCREENSHOT_METHOD = None
+        _FIRST_URL_PROCESSED = False
         return False
     
     # For subsequent URLs, use the best method determined from the first URL
@@ -514,8 +532,9 @@ def take_screenshot(url, output_path, priority="normal"):
         success = take_browser_screenshot(url, output_path)
     elif _BEST_SCREENSHOT_METHOD == "resource-aware":
         success = take_resource_aware_screenshot(url, output_path)
-    else:  # fallback
-        success = create_fallback_screenshot(url, output_path)
+    else:
+        _FIRST_URL_PROCESSED = False
+        return take_screenshot(url, output_path, priority)
         
     # If the chosen method fails, try fallbacks
     if not success:

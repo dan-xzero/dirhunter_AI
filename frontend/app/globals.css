@@ -1,0 +1,110 @@
+@import "tailwindcss";
+
+@theme {
+  --color-void: #06070b;
+  --color-obsidian: #0c0f16;
+  --color-panel: rgba(15, 20, 31, 0.78);
+  --color-panel-soft: rgba(15, 20, 31, 0.56);
+  --color-line: rgba(150, 170, 220, 0.12);
+  --color-line-hard: rgba(150, 170, 220, 0.22);
+  --color-ink: #eff2fb;
+  --color-muted: rgba(220, 226, 240, 0.62);
+  --color-teal: #2dd4bf;
+  --color-teal-dim: rgba(45, 212, 191, 0.12);
+  --color-amber: #f6c453;
+  --color-amber-dim: rgba(246, 196, 83, 0.12);
+  --color-rose: #fb7185;
+  --color-rose-dim: rgba(251, 113, 133, 0.12);
+  --color-blue: #60a5fa;
+  --color-blue-dim: rgba(96, 165, 250, 0.12);
+  --font-sans: var(--font-geist-sans), "Avenir Next", system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), "SFMono-Regular", monospace;
+}
+
+:root {
+  color-scheme: dark;
+  background: #06070b;
+  color: #eff2fb;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-height: 100%;
+}
+
+body {
+  min-height: 100%;
+  margin: 0;
+  background:
+    radial-gradient(circle at 20% 10%, rgba(45, 212, 191, 0.18), transparent 28rem),
+    radial-gradient(circle at 80% 0%, rgba(96, 165, 250, 0.12), transparent 24rem),
+    linear-gradient(180deg, #06070b 0%, #090c13 48%, #06070b 100%);
+  color: #eff2fb;
+  font-family: var(--font-sans);
+}
+
+button,
+a,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button,
+a {
+  cursor: pointer;
+}
+
+::selection {
+  background: rgba(45, 212, 191, 0.35);
+}
+
+:focus-visible {
+  outline: 2px solid #2dd4bf;
+  outline-offset: 2px;
+}
+
+.skip-link {
+  position: absolute;
+  left: 1rem;
+  top: -3rem;
+  z-index: 100;
+  border-radius: 0.75rem;
+  border: 1px solid var(--color-teal);
+  background: var(--color-obsidian);
+  padding: 0.6rem 1rem;
+  font-size: 0.875rem;
+  color: var(--color-teal);
+  transition: top 0.15s ease;
+}
+
+.skip-link:focus {
+  top: 1rem;
+}
+
+.glass {
+  border: 1px solid var(--color-line);
+  background: var(--color-panel);
+  backdrop-filter: blur(22px) saturate(1.15);
+  box-shadow: 0 22px 80px rgba(0, 0, 0, 0.28);
+}
+
+.thin-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.35) transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}

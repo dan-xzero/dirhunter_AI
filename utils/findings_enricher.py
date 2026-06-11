@@ -8,10 +8,6 @@ logger = logging.getLogger(__name__)
 
 def enrich_findings(domain, findings):
     """Add missing data to findings to ensure complete reporting"""
-    # Import here to avoid circular imports
-    from utils.path_handler import path_manager
-    from utils.screenshot import create_fallback_screenshot
-    
     enriched = []
     
     for finding in findings:
@@ -70,16 +66,11 @@ def enrich_findings(domain, findings):
                 for secret in dm['potential_secrets']
             ]
             
-        # Ensure screenshot exists
+        # Do not manufacture placeholder images for non-visual findings.
+        # The portal can show headers/body evidence directly when no real
+        # browser screenshot was captured.
         if 'screenshot' not in finding or not finding['screenshot'] or not os.path.exists(finding['screenshot']):
-            # Try to create a placeholder
-            safe_path = finding.get('path', '').replace('/', '_').strip('_')
-            if not safe_path:
-                safe_path = 'root'
-            
-            screenshot_path = path_manager.get_screenshot_path(domain, f"{safe_path}.png")
-            create_fallback_screenshot(finding.get('url', domain), screenshot_path)
-            finding['screenshot'] = screenshot_path
+            finding['screenshot'] = ""
         
         enriched.append(finding)
         

@@ -11,6 +11,8 @@ import sys
 import hmac
 import hashlib
 import time
+import json
+import asyncio
 
 load_dotenv(override=True)
 
@@ -193,6 +195,37 @@ def slack_dirscan():
         "response_type": "in_channel", 
         "text": f"🚀 *{user_name}* started fuzzing scan for *{scan_target}*!\n\nResults will be posted here when ready. This may take several minutes depending on the number of domains and paths."
     })
+
+@app.route("/slack/interactive", methods=["POST"])
+def slack_interactive():
+    if not verify_slack_request(request):
+        return jsonify({"error": "invalid request"}), 400
+
+    payload_raw = request.form.get("payload", "")
+    try:
+        payload = json.loads(payload_raw)
+    except json.JSONDecodeError:
+        return jsonify({"text": "Invalid Slack payload"}), 400
+
+    actions = payload.get("actions") or []
+    if not actions:
+        return jsonify({"text": "No action supplied"}), 400
+
+    action = actions[0]
+    value = action.get("value", "")
+    user = (payload.get("user") or {}).get("username") or (payload.get("user") or {}).get("id") or "slack"
+
+    if value.startswith("mark_fp:"):
+        finding_id = int(value.split(":", 1)[1])
+        try:
+            from app.services.findings import add_triage
+
+            asyncio.run(add_triage(finding_id=finding_id, label="fp", user=user, note="Marked from Slack"))
+            return jsonify({"text": f"Marked finding #{finding_id} as false positive."})
+        except Exception as e:
+            return jsonify({"text": f"Failed to triage finding: {e}"}), 500
+
+    return jsonify({"text": "Unknown action"}), 400
 
 # ─────────── Serve Reports ───────────
 @app.route("/reports/<path:filename>", methods=["GET"])

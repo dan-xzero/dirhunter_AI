@@ -20,7 +20,17 @@ from utils.tag_validator import validate_tagged_entry
 from utils.performance import PerformanceTracker
 from utils.dns_check import pre_scan_dns_check
 from utils.findings_enricher import enrich_findings
-from config import EXTENSIONS, THREADS, SCREENSHOT_DIR, RAW_RESULTS_DIR
+from config import (
+    EXTENSIONS,
+    KILL_BROWSER_SESSIONS,
+    RAW_RESULTS_DIR,
+    SCREENSHOT_DIR,
+    THREADS,
+    USE_LEGACY_HTML,
+    USE_LLM_VALIDATOR,
+    USE_NEW_SLACK,
+    USE_PG,
+)
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import multiprocessing
@@ -143,12 +153,38 @@ def capture_headers(url, timeout=10):
         logger.debug(f"Failed to capture headers for {url}: {e}")
         return {}
 
+
+def finding_path_priority(entry):
+    """Prefer human-reviewable paths when duplicate app shells collapse to one finding."""
+    path = (entry.get("path") or "").strip("/").lower()
+    priority_terms = [
+        ("login", 0),
+        ("signin", 0),
+        ("auth", 0),
+        ("admin", 1),
+        ("dashboard", 1),
+        ("manage", 1),
+        ("api/docs", 2),
+        ("swagger", 2),
+        ("robots.txt", 8),
+        ("sitemap.xml", 8),
+    ]
+    for term, priority in priority_terms:
+        if term in path:
+            return (priority, len(path), path)
+    return (5, len(path), path)
+
+
 load_dotenv(override=True)
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 # Add the aggressive_browser_cleanup function near the top after imports
 def aggressive_browser_cleanup():
     """Aggressively clean up all browser processes"""
+    if not KILL_BROWSER_SESSIONS:
+        logger.info("Skipping aggressive browser cleanup because DIRHUNTER_KILL_BROWSER_SESSIONS is disabled")
+        return
+
     try:
         logger.info("Performing aggressive browser cleanup...")
         
@@ -325,6 +361,7 @@ def process_domain_optimized(domain, wordlist, ignore_hash, screenshot_workers, 
 
         # Filter with performance tracking
         filter_start = time.time()
+        raw = sorted(raw, key=finding_path_priority)
         filtered = filter_false_positives(domain, raw, ignore_hash=ignore_hash, fast=fast_filter)
         filter_duration = time.time() - filter_start
         perf_metrics['filter_time'] = filter_duration
@@ -346,6 +383,7 @@ def process_domain_optimized(domain, wordlist, ignore_hash, screenshot_workers, 
         # Apply additional false positive filtering
         logger.info(f"Applying enhanced false positive filtering to {len(filtered)} results...")
         enhanced_filtered = []
+        filtered = sorted(filtered, key=finding_path_priority)
         
         for entry in filtered:
             # Skip if already marked as downloadable
@@ -507,11 +545,21 @@ def process_domain_optimized(domain, wordlist, ignore_hash, screenshot_workers, 
         except Exception as e:
             logger.error(f"Failed to enrich findings for {domain}: {e}")
 
+        if USE_LLM_VALIDATOR and filtered:
+            try:
+                from utils.llm_validator import validate_batch
+
+                filtered = validate_batch(filtered)
+                logger.info(f"Validated {len(filtered)} findings with LLM for {domain}")
+            except Exception as e:
+                logger.error(f"LLM finding validation failed for {domain}: {e}")
+
         # Check for critical findings and send immediate alerts
         check_and_send_critical_alerts(domain, filtered, no_critical_alerts)
 
-        # Export reports
-        export_tag_based_reports(domain, filtered)
+        # Export legacy HTML reports while the portal migration is in dual-write mode.
+        if USE_LEGACY_HTML:
+            export_tag_based_reports(domain, filtered)
 
         # Record total time
         total_duration = time.time() - start_time
@@ -592,7 +640,8 @@ def process_domains_parallel(domains_with_wordlists, args, shared_results):
         try:
             # Create initial dashboard early
             dashboard_path = os.path.join("results", "html", "dashboard.html")
-            create_dashboard(shared_results.get_all(), dashboard_path)
+            if USE_LEGACY_HTML:
+                create_dashboard(shared_results.get_all(), dashboard_path)
             
             # Process completed domains
             for future in as_completed(future_to_domain):
@@ -612,7 +661,8 @@ def process_domains_parallel(domains_with_wordlists, args, shared_results):
                         try:
                             # Update main dashboard in HTML_REPORT_DIR
                             dashboard_path = os.path.join("results", "html", "dashboard.html")
-                            create_dashboard(shared_results.get_all(), dashboard_path)
+                            if USE_LEGACY_HTML:
+                                create_dashboard(shared_results.get_all(), dashboard_path)
                             
                         except Exception as e:
                             logger.warning(f"Dashboard update failed: {e}")
@@ -626,7 +676,7 @@ def process_domains_parallel(domains_with_wordlists, args, shared_results):
             # Handle graceful shutdown
         
         # Kill any remaining browser processes
-        if resource_manager:
+        if resource_manager and KILL_BROWSER_SESSIONS:
             resource_manager.kill_browser_processes()
     
     return results, perf_data
@@ -712,6 +762,9 @@ def main():
         logger.info("Hash database reset.")
         sys.exit(0)
 
+    pg_scan_id = None
+    partial_pg_scan = os.getenv("DIRHUNTER_PARTIAL_SCAN", "0").lower() in {"1", "true", "yes", "on"}
+
     # Initialize batch database writer
     db_writer = BatchDatabaseWriter()
 
@@ -765,19 +818,38 @@ def main():
     
     # Create shared results container
     shared_results = SharedResults()
+    if USE_PG:
+        try:
+            from app.services.findings import create_scan_sync
+
+            if os.getenv("SCAN_ID"):
+                pg_scan_id = int(os.getenv("SCAN_ID"))
+            else:
+                pg_scan_id = create_scan_sync(
+                    trigger="cron" if not args.domains else "manual",
+                    wordlist=args.wordlist,
+                    args=vars(args),
+                )
+            logger.info(f"Created Postgres scan record: {pg_scan_id}")
+        except Exception as e:
+            logger.error(f"Postgres scan creation failed; continuing with legacy storage: {e}")
+            pg_scan_id = None
     
     try:
         # Create initial dashboard
-        logger.info("Creating initial dashboard...")
-        dashboard_path = os.path.join("results", "html", "dashboard.html")
-        create_dashboard({}, dashboard_path)
+        if USE_LEGACY_HTML:
+            logger.info("Creating initial dashboard...")
+            dashboard_path = os.path.join("results", "html", "dashboard.html")
+            create_dashboard({}, dashboard_path)
         
 
             
         # Get server hostname for dashboard URL
         # Use REPORT_BASE_URL for dashboard URL
         REPORT_BASE_URL = os.getenv("REPORT_BASE_URL")
-        if REPORT_BASE_URL:
+        if USE_PG and os.getenv("PORTAL_BASE_URL"):
+            dashboard_url = f"{os.getenv('PORTAL_BASE_URL').rstrip('/')}/scans/{pg_scan_id or ''}"
+        elif REPORT_BASE_URL:
             dashboard_url = f"{REPORT_BASE_URL}/reports/dashboard.html"
         else:
             # Fallback to local IP if REPORT_BASE_URL not set
@@ -786,7 +858,7 @@ def main():
             dashboard_url = f"http://{ip_address}/results/html/dashboard.html"
         
         # Send start scan notification to Slack
-        if WEBHOOK_URL and WEBHOOK_URL.lower() != "none":
+        if WEBHOOK_URL and WEBHOOK_URL.lower() != "none" and not partial_pg_scan:
             total_domains = len(domains_with_wordlists)
             start_message = (
                 f":mag: *DirHunter AI Scan Started*\n"
@@ -822,8 +894,9 @@ def main():
     # Create final dashboard
     try:
         dashboard_path = os.path.join("results", "html", "dashboard.html")
-        create_dashboard(results, dashboard_path)
-        logger.info(f"Final dashboard created: {dashboard_path}")
+        if USE_LEGACY_HTML:
+            create_dashboard(results, dashboard_path)
+            logger.info(f"Final dashboard created: {dashboard_path}")
         
         # Add to run history
         try:
@@ -836,9 +909,38 @@ def main():
     
     # Flush database writer
     db_writer.flush()
+
+    if USE_PG and pg_scan_id:
+        try:
+            from app.services.findings import persist_batch_sync, persist_and_complete_scan_sync
+
+            if partial_pg_scan:
+                pg_stats = persist_batch_sync(pg_scan_id, results or {})
+            else:
+                pg_stats = persist_and_complete_scan_sync(pg_scan_id, results or {}, status="completed")
+            logger.info(f"Postgres dual-write complete for scan {pg_scan_id}: {pg_stats}")
+        except Exception as e:
+            logger.error(f"Postgres dual-write failed for scan {pg_scan_id}: {e}")
+            try:
+                from app.services.findings import complete_scan_sync
+
+                if not partial_pg_scan:
+                    complete_scan_sync(pg_scan_id, status="failed", stats={"error": str(e)})
+            except Exception:
+                pass
     
     # Send Slack summary (if webhook is set)
-    if WEBHOOK_URL:
+    if WEBHOOK_URL and USE_NEW_SLACK and pg_scan_id and not partial_pg_scan:
+        try:
+            from app.services.slack import send_digest_sync
+
+            if send_digest_sync(pg_scan_id, WEBHOOK_URL):
+                logger.info("Slack digest sent successfully")
+            else:
+                logger.error("Slack digest failed")
+        except Exception as e:
+            logger.error(f"Slack digest failed with exception: {e}")
+    elif WEBHOOK_URL and not partial_pg_scan:
         try:
             # Calculate key statistics
             total_domains = len(results) if results else 0
@@ -932,7 +1034,9 @@ def main():
             
             # Get dashboard URL
             REPORT_BASE_URL = os.getenv("REPORT_BASE_URL")
-            if REPORT_BASE_URL:
+            if USE_PG and os.getenv("PORTAL_BASE_URL"):
+                dashboard_url = f"{os.getenv('PORTAL_BASE_URL').rstrip('/')}/scans/{pg_scan_id or ''}"
+            elif REPORT_BASE_URL:
                 dashboard_url = f"{REPORT_BASE_URL}/reports/dashboard.html"
             else:
                 # Fallback to local IP
@@ -961,7 +1065,7 @@ def main():
             logger.error(f"❌ Exception details: {traceback.format_exc()}")
     elif not WEBHOOK_URL:
         logger.warning("WEBHOOK_URL not set. Skipping Slack alert.")
-    elif not results:
+    elif not results and not partial_pg_scan:
         logger.info("No results found across all domains. Sending completion notification anyway.")
         # Send a simple completion message even when no results
         try:
@@ -989,11 +1093,14 @@ def main():
     
     # Show performance report if requested
     if args.performance_report:
-        perf_report = perf.generate_report()
-        print("\n" + "="*80)
-        print("PERFORMANCE REPORT")
-        print("="*80)
-        print(perf_report)
+        try:
+            perf_report = perf.generate_report(time.time() - start_time)
+            print("\n" + "="*80)
+            print("PERFORMANCE REPORT")
+            print("="*80)
+            print(perf_report)
+        except Exception as e:
+            logger.warning(f"Performance report generation failed: {e}")
     
     # Stop resource monitoring if it was started
     if resource_manager:
