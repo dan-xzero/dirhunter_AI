@@ -8,7 +8,7 @@ Type=simple
 WorkingDirectory=/opt/dirhunter_AI/frontend
 EnvironmentFile=/etc/dirhunter/dirhunter.env
 Environment=PORT=3000
-ExecStart=/usr/bin/npm run start
+ExecStart=/usr/bin/node .next/standalone/server.js
 Restart=always
 RestartSec=5
 User=root
