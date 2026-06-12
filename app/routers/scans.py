@@ -44,7 +44,10 @@ async def create_scan_record(
     session: AsyncSession = Depends(get_session),
     _actor: Actor = Depends(current_actor),
 ) -> Scan:
-    scan_id = await enqueue_scan(domains=payload.domains, wordlist=payload.wordlist, args=payload.args)
+    try:
+        scan_id = await enqueue_scan(domains=payload.domains, wordlist=payload.wordlist, args=payload.args)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     scan = await session.get(Scan, scan_id)
     if not scan:
         raise HTTPException(status_code=500, detail="scan creation failed")

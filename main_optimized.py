@@ -184,6 +184,36 @@ def count_wordlist_urls(wordlist):
         return 0
 
 
+def nonprod_only_enabled():
+    return os.getenv("DIRHUNTER_NONPROD_ONLY", "1").lower() in {"1", "true", "yes", "on"}
+
+
+def looks_prod_like(domain):
+    value = (domain or "").strip().lower()
+    host = value.split("/", 1)[0]
+    path = value[len(host):]
+    prod_host_terms = ("api-prod", ".prod.", "-prod.", ".prod-", "-prod-", "production")
+    if host == "prod" or host.startswith("prod.") or host.endswith(".prod"):
+        return True
+    if any(term in host for term in prod_host_terms):
+        return True
+    return any(segment == "prod" or segment.startswith("prod-") for segment in path.split("/") if segment)
+
+
+def enforce_nonprod_only(domains_with_wordlists):
+    if not nonprod_only_enabled():
+        return
+    blocked = [
+        domain
+        for domain, wordlist in domains_with_wordlists
+        if "wordlist_prod" in (wordlist or "").lower() or looks_prod_like(domain)
+    ]
+    if blocked:
+        sample = ", ".join(blocked[:5])
+        logger.error(f"Blocked prod-like scan target(s) while DIRHUNTER_NONPROD_ONLY is enabled: {sample}")
+        sys.exit(2)
+
+
 def summarize_scan_metrics(perf_data, domains_with_wordlists):
     domain_urls_scanned = {}
     for domain, wordlist in domains_with_wordlists:
@@ -815,14 +845,17 @@ def main():
             # For retries, use the list of domains with previous rate limits
             from utils.rate_control import load_rate_limited_domains
             domains = load_rate_limited_domains()
-            domains_with_wordlists = [(domain, "wordlists/wordlist_prod.txt") for domain in domains]
+            retry_wordlist = "wordlists/wordlist_nonprod.txt" if nonprod_only_enabled() else "wordlists/wordlist_prod.txt"
+            domains_with_wordlists = [(domain, retry_wordlist) for domain in domains]
         else:
             # Default: scan prod domains with prod wordlist, nonprod with nonprod wordlist
-            domains_with_wordlists = [
-                (domain, "wordlists/wordlist_prod.txt") for domain in prod_domains
-            ] + [
-                (domain, "wordlists/wordlist_nonprod.txt") for domain in nonprod_domains
-            ]
+            domains_with_wordlists = [(domain, "wordlists/wordlist_nonprod.txt") for domain in nonprod_domains]
+            if not nonprod_only_enabled():
+                domains_with_wordlists = [
+                    (domain, "wordlists/wordlist_prod.txt") for domain in prod_domains
+                ] + domains_with_wordlists
+
+    enforce_nonprod_only(domains_with_wordlists)
     
     # Validate domains with DNS lookup (skip for retry mode)
     if not args.retry_rate_limits:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import signal
 import sys
 import time
@@ -19,6 +20,10 @@ from app.services.findings import complete_scan, create_scan, update_scan_state
 from app.settings import settings
 
 
+PROD_HOST_RE = re.compile(r"(^|[.-])prod($|[.-])|production|^api-prod", re.IGNORECASE)
+PROD_PATH_RE = re.compile(r"(^|/)prod($|/|-)", re.IGNORECASE)
+
+
 def build_scan_command(scan_id: int, domains: str | None = None, wordlist: str | None = None, args: list[str] | None = None) -> list[str]:
     command = [sys.executable, "main_optimized.py"]
     if domains:
@@ -30,6 +35,7 @@ def build_scan_command(scan_id: int, domains: str | None = None, wordlist: str |
 
 
 async def enqueue_scan(domains: str | None = None, wordlist: str | None = None, args: list[str] | None = None) -> int:
+    _assert_nonprod_only_scan(domains, wordlist)
     scan_id = await create_scan(trigger="api", wordlist=wordlist, args={"domains": domains, "args": args or []})
     redis = await create_pool(RedisSettings.from_dsn(settings.redis_url))
     await redis.enqueue_job("run_scan", scan_id, domains, wordlist, args or [])
@@ -45,6 +51,7 @@ async def enqueue_scan_resume(scan_id: int, *, reason: str = "manual") -> bool:
         domains = payload.get("domains")
         args = list(payload.get("args") or [])
         wordlist = scan.wordlist
+        _assert_nonprod_only_scan(domains, wordlist)
         stats = dict(scan.stats or {})
         for key in ("exit_code", "error"):
             stats.pop(key, None)
@@ -67,6 +74,7 @@ async def enqueue_scan_resume(scan_id: int, *, reason: str = "manual") -> bool:
 
 
 async def run_scan(ctx: dict[str, Any], scan_id: int, domains: str | None, wordlist: str | None, args: list[str]) -> None:
+    _assert_nonprod_only_scan(domains, wordlist)
     domain_items = _split_domains(domains)
     if len(domain_items) > 1:
         await _enqueue_domain_jobs(scan_id, domain_items, wordlist, args)
@@ -339,6 +347,30 @@ def _count_wordlist_urls(wordlist: str | None) -> int:
             return sum(1 for line in handle if line.strip())
     except OSError:
         return 0
+
+
+def _assert_nonprod_only_scan(domains: str | None, wordlist: str | None) -> None:
+    if not _nonprod_only_enabled():
+        return
+    wordlist_name = (wordlist or "").lower()
+    if "wordlist_prod" in wordlist_name:
+        raise ValueError("prod wordlist is blocked while DIRHUNTER_NONPROD_ONLY is enabled")
+
+    prod_like = [domain for domain in _split_domains(domains) if _looks_prod_like(domain)]
+    if prod_like:
+        sample = ", ".join(prod_like[:5])
+        raise ValueError(f"prod-like domains are blocked while DIRHUNTER_NONPROD_ONLY is enabled: {sample}")
+
+
+def _nonprod_only_enabled() -> bool:
+    return os.getenv("DIRHUNTER_NONPROD_ONLY", "1").lower() in {"1", "true", "yes", "on"}
+
+
+def _looks_prod_like(domain: str) -> bool:
+    value = domain.strip().lower()
+    host = value.split("/", 1)[0]
+    path = value[len(host):]
+    return bool(PROD_HOST_RE.search(host) or PROD_PATH_RE.search(path))
 
 
 def _utcnow_iso() -> str:
