@@ -36,6 +36,8 @@ async def find_resume_candidates(stale_minutes: int, max_attempts: int) -> list[
         )
         for scan in result.scalars():
             stats = scan.stats or {}
+            if stats.get("resume_disabled"):
+                continue
             attempts = int(stats.get("resume_attempts") or 0)
             if attempts >= max_attempts:
                 continue

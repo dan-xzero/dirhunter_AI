@@ -57,6 +57,9 @@ export type Finding = {
     cves: Array<{ cve_id: string; severity?: string | null }>;
   }>;
   similar_fp_count: number;
+  criticality: "critical" | "high" | "medium" | "low" | string;
+  criticality_score: number;
+  criticality_reason: string;
 };
 
 export type FindingList = {
@@ -80,6 +83,14 @@ export type Scan = {
     recurring: number;
     changed: number;
   } | null;
+  criticality_breakdown?: CriticalityBreakdown | null;
+};
+
+export type CriticalityBreakdown = {
+  critical: number;
+  high: number;
+  medium: number;
+  low: number;
 };
 
 export type ScanList = {
@@ -104,4 +115,5 @@ export type OverviewStats = {
   by_status: Record<string, number>;
   raw_by_status: Record<string, number>;
   by_verdict: Record<string, number>;
+  by_criticality: CriticalityBreakdown;
 };

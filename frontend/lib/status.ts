@@ -25,3 +25,7 @@ export function formatStatus(value?: string | null): string {
 export function emptyStatusBreakdown() {
   return { new: 0, recurring: 0, changed: 0 };
 }
+
+export function emptyCriticalityBreakdown() {
+  return { critical: 0, high: 0, medium: 0, low: 0 };
+}

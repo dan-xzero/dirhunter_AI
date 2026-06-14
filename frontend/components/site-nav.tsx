@@ -3,14 +3,13 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Activity, ListChecks, ListFilter, Menu, Radar, Settings, X } from "lucide-react";
+import { Activity, ListChecks, ListFilter, Menu, Radar, X } from "lucide-react";
 import clsx from "clsx";
 
 const NAV_ITEMS = [
   { href: "/", label: "Overview", icon: Radar },
   { href: "/findings", label: "Findings", icon: ListFilter },
-  { href: "/scans", label: "Scans", icon: ListChecks },
-  { href: "/settings", label: "Settings", icon: Settings }
+  { href: "/scans", label: "Scans", icon: ListChecks }
 ] as const;
 
 function isActive(pathname: string, href: string) {

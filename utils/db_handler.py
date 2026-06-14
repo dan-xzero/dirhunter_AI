@@ -4,9 +4,16 @@ import sqlite3, os, datetime
 DB_FILE = "db/endpoint_hashes.sqlite"
 os.makedirs("db", exist_ok=True)
 
+
+def _connect():
+    conn = sqlite3.connect(DB_FILE, timeout=30)
+    conn.execute("PRAGMA busy_timeout = 30000")
+    conn.execute("PRAGMA journal_mode = WAL")
+    return conn
+
 # ─────────── setup ───────────
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = _connect()
     c = conn.cursor()
     
     # Original table for backward compatibility
@@ -58,7 +65,7 @@ def init_db():
 
 # ─────────── check + update ───────────
 def get_stored_hash(url):
-    conn = sqlite3.connect(DB_FILE)
+    conn = _connect()
     c = conn.cursor()
     c.execute("SELECT sha1 FROM endpoint_hashes WHERE url = ?", (url,))
     row = c.fetchone()
@@ -67,7 +74,7 @@ def get_stored_hash(url):
 
 def update_hash_record(url, sha1):
     now = datetime.datetime.utcnow()
-    conn = sqlite3.connect(DB_FILE)
+    conn = _connect()
     c = conn.cursor()
     c.execute("""
         INSERT INTO endpoint_hashes (url, sha1, last_seen)
@@ -80,7 +87,7 @@ def update_hash_record(url, sha1):
 # ─────────── new finding history functions ───────────
 def track_finding(finding_data):
     """Track a finding with full history"""
-    conn = sqlite3.connect(DB_FILE)
+    conn = _connect()
     c = conn.cursor()
     
     # First check if this exact URL+hash combination exists
@@ -154,7 +161,7 @@ def track_finding(finding_data):
 
 def get_finding_status(url, sha1_hash=None):
     """Get the status of a finding (new/existing/changed)"""
-    conn = sqlite3.connect(DB_FILE)
+    conn = _connect()
     c = conn.cursor()
     
     if sha1_hash:
@@ -209,7 +216,7 @@ def get_finding_status(url, sha1_hash=None):
 # ─────────── rate limit tracking ───────────
 def track_rate_limit(domain, path, wordlist_position):
     """Track rate limited paths for retry"""
-    conn = sqlite3.connect(DB_FILE)
+    conn = _connect()
     c = conn.cursor()
     c.execute("""
         INSERT INTO rate_limit_tracker (domain, path, wordlist_position)
@@ -223,7 +230,7 @@ def track_rate_limit(domain, path, wordlist_position):
 
 def get_pending_rate_limits(domain=None):
     """Get paths that need retry due to rate limiting"""
-    conn = sqlite3.connect(DB_FILE)
+    conn = _connect()
     c = conn.cursor()
     
     if domain:
@@ -247,7 +254,7 @@ def get_pending_rate_limits(domain=None):
 
 def mark_rate_limit_completed(domain, path):
     """Mark a rate limited path as completed"""
-    conn = sqlite3.connect(DB_FILE)
+    conn = _connect()
     c = conn.cursor()
     c.execute("""
         UPDATE rate_limit_tracker
@@ -260,7 +267,7 @@ def mark_rate_limit_completed(domain, path):
 # ─────────── batch operations ───────────
 def batch_track_findings(findings_list):
     """Track multiple findings in a single transaction for better performance"""
-    conn = sqlite3.connect(DB_FILE)
+    conn = _connect()
     c = conn.cursor()
     
     try:
@@ -339,7 +346,7 @@ def batch_track_findings(findings_list):
 
 # ─────────── reset DB ───────────
 def reset_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = _connect()
     c = conn.cursor()
     c.execute("DELETE FROM endpoint_hashes")
     c.execute("DELETE FROM finding_history")

@@ -6,6 +6,7 @@ import { useQuery } from "@tanstack/react-query";
 import { FindingsWorkbench } from "@/components/findings-workbench";
 import { StatCard } from "@/components/stat-card";
 import { fetchFindings, fetchScan } from "@/lib/api";
+import { emptyCriticalityBreakdown } from "@/lib/status";
 
 export default function ScanPage() {
   const params = useParams<{ id: string }>();
@@ -20,12 +21,13 @@ export default function ScanPage() {
   });
 
   const breakdown = scan.data?.status_breakdown;
+  const criticality = scan.data?.criticality_breakdown ?? emptyCriticalityBreakdown();
   const rawTotal = scan.data ? (breakdown ? breakdown.new + breakdown.recurring + breakdown.changed : 0) : undefined;
   const urlsScanned = typeof scan.data?.stats?.urls_scanned === "number" ? scan.data.stats.urls_scanned : 0;
 
   return (
     <main id="main-content" className="space-y-5">
-      <section className="grid gap-4 md:grid-cols-5">
+      <section className="grid gap-4 md:grid-cols-4 xl:grid-cols-7">
         <StatCard
           label="Scan"
           value={`#${params.id}`}
@@ -46,6 +48,20 @@ export default function ScanPage() {
           detail="Likely false positives kept for audit"
           loading={suppressed.isLoading}
           error={suppressed.isError}
+        />
+        <StatCard
+          label="High"
+          value={criticality.high}
+          detail={`${criticality.critical} critical`}
+          loading={scan.isLoading}
+          error={scan.isError}
+        />
+        <StatCard
+          label="Medium"
+          value={criticality.medium}
+          detail={`${criticality.low} low`}
+          loading={scan.isLoading}
+          error={scan.isError}
         />
         <StatCard
           label="URLs Scanned"

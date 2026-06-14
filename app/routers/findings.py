@@ -9,6 +9,7 @@ from app.auth import Actor, current_actor
 from app.db import get_session
 from app.models import Finding, FindingTriage, TechDetection
 from app.schemas import FindingListOut, FindingOut, TriageIn, TriageOut
+from app.services.criticality import attach_criticality
 from app.services.findings import add_triage, list_findings, upsert_validation
 
 router = APIRouter(prefix="/api/findings", tags=["findings"])
@@ -22,6 +23,7 @@ async def get_findings(
     tag: str | None = None,
     triage: str | None = None,
     verdict: str | None = None,
+    criticality: str | None = None,
     include_likely_fp: bool = False,
     include_unvalidated: bool = False,
     q: str | None = None,
@@ -37,6 +39,7 @@ async def get_findings(
         tag=tag,
         triage=triage,
         verdict=verdict,
+        criticality=criticality,
         include_likely_fp=include_likely_fp,
         include_unvalidated=include_unvalidated,
         q=q,
@@ -63,7 +66,7 @@ async def get_finding(finding_id: int, session: AsyncSession = Depends(get_sessi
     if not finding:
         raise HTTPException(status_code=404, detail="finding not found")
     finding.similar_fp_count = await _similar_fp_count(session, finding)
-    return finding
+    return attach_criticality(finding)
 
 
 async def _similar_fp_count(session: AsyncSession, finding: Finding) -> int:

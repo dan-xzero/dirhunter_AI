@@ -26,6 +26,6 @@ install -m 0644 "$REPO_ROOT/deploy/dirhunter-portal-watchdog.timer" /etc/systemd
 install -m 0644 "$REPO_ROOT/deploy/logrotate/dirhunter" /etc/logrotate.d/dirhunter
 
 systemctl daemon-reload
-systemctl enable dirhunter-api dirhunter-worker dirhunter-slack dirhunter-ui dirhunter-scan-watchdog.timer dirhunter-portal-watchdog.timer
+systemctl enable dirhunter-api dirhunter-worker dirhunter-slack dirhunter-ui dirhunter-portal-watchdog.timer
 
 echo "Installed DirHunter services. Edit $ENV_DIR/dirhunter.env before starting them."

@@ -22,7 +22,7 @@ SERVICES = (
     "dirhunter-worker",
     "dirhunter-ui",
 )
-TIMERS = ("dirhunter-scan-watchdog.timer", "dirhunter-portal-watchdog.timer")
+TIMERS = ("dirhunter-portal-watchdog.timer",)
 
 
 def parse_args() -> argparse.Namespace:

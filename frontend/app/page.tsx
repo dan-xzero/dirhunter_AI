@@ -7,7 +7,7 @@ import { Chip } from "@/components/chip";
 import { StatCard } from "@/components/stat-card";
 import { EmptyState, ErrorState, Skeleton } from "@/components/ui";
 import { fetchOverview, fetchScans } from "@/lib/api";
-import { formatStatus } from "@/lib/status";
+import { emptyCriticalityBreakdown, formatStatus } from "@/lib/status";
 
 export default function OverviewPage() {
   const overview = useQuery({ queryKey: ["overview"], queryFn: fetchOverview });
@@ -15,6 +15,7 @@ export default function OverviewPage() {
 
   const stats = overview.data;
   const verdictTotal = Object.values(stats?.by_verdict ?? {}).reduce((sum, count) => sum + count, 0);
+  const criticality = stats?.by_criticality ?? emptyCriticalityBreakdown();
 
   return (
     <main id="main-content" className="space-y-5">
@@ -48,13 +49,15 @@ export default function OverviewPage() {
         />
       ) : (
         <>
-          <section className="grid gap-4 md:grid-cols-4">
+          <section className="grid gap-4 md:grid-cols-3 xl:grid-cols-6">
             <StatCard
               label="Actionable"
               value={stats?.actionable_findings}
               detail="Validated and not likely FP"
               loading={overview.isLoading}
             />
+            <StatCard label="High" value={criticality.high} detail="Prioritize today" loading={overview.isLoading} />
+            <StatCard label="Medium" value={criticality.medium} detail="Review after High" loading={overview.isLoading} />
             <StatCard
               label="Needs Triage"
               value={stats?.needs_triage}
@@ -107,6 +110,19 @@ export default function OverviewPage() {
                   </div>
                 </div>
                 <div className="mt-3 flex flex-wrap gap-3">
+                  {Object.entries(criticality).map(([level, count]) => (
+                    <span key={level} className="flex items-center gap-1.5 text-xs text-muted">
+                      <span
+                        aria-hidden="true"
+                        className={`h-2.5 w-2.5 rounded-full ${
+                          level === "critical" ? "bg-rose" : level === "high" ? "bg-amber" : level === "medium" ? "bg-blue" : "bg-muted"
+                        }`}
+                      />
+                      {level}: <span className="font-mono text-ink">{count}</span>
+                    </span>
+                  ))}
+                </div>
+                <div className="mt-3 flex flex-wrap gap-3 border-t border-line pt-3">
                   {Object.entries(stats?.by_verdict ?? {}).map(([verdict, count]) => (
                     <span key={verdict} className="flex items-center gap-1.5 text-xs text-muted">
                       <span
@@ -156,6 +172,7 @@ export default function OverviewPage() {
                   <div>
                     <p className="font-mono text-sm text-ink">Scan #{scan.id}</p>
                     <p className="mt-1 text-sm text-muted">{new Date(scan.started_at).toLocaleString()}</p>
+                    <CriticalityPills breakdown={scan.criticality_breakdown} />
                   </div>
                   <Chip value={scan.status} />
                 </Link>
@@ -176,6 +193,30 @@ export default function OverviewPage() {
         </div>
       </section>
     </main>
+  );
+}
+
+function CriticalityPills({ breakdown }: { breakdown?: { critical: number; high: number; medium: number; low: number } | null }) {
+  const counts = breakdown ?? emptyCriticalityBreakdown();
+  return (
+    <span className="mt-2 flex flex-wrap gap-1.5">
+      <TinyPill label="High" value={counts.high} tone="amber" />
+      <TinyPill label="Med" value={counts.medium} tone="blue" />
+      <TinyPill label="Crit" value={counts.critical} tone="rose" />
+    </span>
+  );
+}
+
+function TinyPill({ label, value, tone }: { label: string; value: number; tone: "rose" | "amber" | "blue" }) {
+  const tones = {
+    rose: "border-rose/30 bg-rose-dim text-rose",
+    amber: "border-amber/30 bg-amber-dim text-amber",
+    blue: "border-blue/30 bg-blue-dim text-blue"
+  };
+  return (
+    <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${tones[tone]}`}>
+      {label} {value}
+    </span>
   );
 }
 

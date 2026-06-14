@@ -10,6 +10,7 @@ from sqlalchemy.orm import selectinload
 
 from app.db import SessionLocal, engine
 from app.models import Finding, FindingValidation, Scan, TechDetection
+from app.services.criticality import attach_criticality
 from app.settings import settings
 
 
@@ -45,18 +46,15 @@ async def send_digest(scan_id: int, webhook_url: str | None = None) -> bool:
             )
             .order_by(Finding.ai_priority.desc(), Finding.last_seen.desc())
         )
-        findings = list(result.scalars().unique())
+        findings = [attach_criticality(item) for item in result.scalars().unique()]
+        findings.sort(key=lambda item: (item.criticality_score, item.last_seen, item.id), reverse=True)
 
     if not scan:
         return False
 
     urls_scanned = int((scan.stats or {}).get("urls_scanned") or 0)
     critical = [
-        item
-        for item in findings
-        if item.ai_priority >= 8
-        and item.finding_status in {"new", "changed"}
-        and (not item.validation or item.validation.llm_verdict == "valid")
+        item for item in findings if item.criticality in {"critical", "high"} and item.finding_status in {"new", "changed"}
     ][:5]
     needs_triage = [
         item
@@ -129,6 +127,8 @@ def _section(title: str, findings: list[Finding]) -> list[dict[str, Any]]:
     for finding in findings:
         domain = finding.domain.host if finding.domain else "unknown"
         confidence = f"{round((finding.validation.llm_confidence if finding.validation else 0) * 100)}%"
+        criticality = getattr(finding, "criticality", "low")
+        reason = getattr(finding, "criticality_reason", "")
         portal_url = f"{settings.effective_portal_url}/findings?finding={finding.id}"
         blocks.append(
             {
@@ -136,7 +136,8 @@ def _section(title: str, findings: list[Finding]) -> list[dict[str, Any]]:
                 "text": {
                     "type": "mrkdwn",
                     "text": (
-                        f"*{domain}* · `{finding.ai_tag}` · `{finding.finding_status}` · `{confidence}`\n"
+                        f"*{domain}* · `{criticality.upper()}` · `{finding.ai_tag}` · `{finding.finding_status}` · `{confidence}`\n"
+                        f"Why: {reason}\n"
                         f"Evidence: {finding.url}\n"
                         f"Portal: <{portal_url}|open finding>"
                     ),

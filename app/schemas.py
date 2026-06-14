@@ -92,6 +92,9 @@ class FindingOut(BaseModel):
     secrets: list[SecretOut] = []
     tech_detections: list[TechDetectionOut] = []
     similar_fp_count: int = 0
+    criticality: str = "low"
+    criticality_score: int = 0
+    criticality_reason: str = ""
 
 
 class FindingListOut(BaseModel):
@@ -116,6 +119,7 @@ class OverviewStatsOut(BaseModel):
     by_status: dict[str, int]
     raw_by_status: dict[str, int]
     by_verdict: dict[str, int]
+    by_criticality: dict[str, int]
 
 
 class ScanOut(BaseModel):
@@ -130,6 +134,7 @@ class ScanOut(BaseModel):
     args: dict[str, Any]
     stats: dict[str, Any]
     status_breakdown: dict[str, int] | None = None
+    criticality_breakdown: dict[str, int] | None = None
 
 
 class TriageIn(BaseModel):

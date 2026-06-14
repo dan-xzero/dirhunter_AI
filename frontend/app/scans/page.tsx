@@ -6,7 +6,7 @@ import { ArrowRight, CalendarClock } from "lucide-react";
 import { Chip } from "@/components/chip";
 import { EmptyState, ErrorState, PageHeader, Skeleton } from "@/components/ui";
 import { fetchScans } from "@/lib/api";
-import { emptyStatusBreakdown } from "@/lib/status";
+import { emptyCriticalityBreakdown, emptyStatusBreakdown } from "@/lib/status";
 import type { Scan } from "@/lib/types";
 
 export default function ScansPage() {
@@ -54,6 +54,7 @@ export default function ScansPage() {
 
 function ScanCard({ scan }: { scan: Scan }) {
   const breakdown = scan.status_breakdown ?? emptyStatusBreakdown();
+  const criticality = scan.criticality_breakdown ?? emptyCriticalityBreakdown();
   const started = new Date(scan.started_at).toLocaleString();
   const finished = scan.finished_at ? new Date(scan.finished_at).toLocaleString() : "Still running";
   const urlsScanned = typeof scan.stats?.urls_scanned === "number" ? scan.stats.urls_scanned : 0;
@@ -80,6 +81,9 @@ function ScanCard({ scan }: { scan: Scan }) {
 
       <div className="flex flex-wrap items-center gap-3">
         <CountPill label="URLs" value={urlsScanned} />
+        <CountPill label="Critical" value={criticality.critical} tone="rose" />
+        <CountPill label="High" value={criticality.high} tone="amber" />
+        <CountPill label="Medium" value={criticality.medium} tone="blue" />
         <CountPill label="Raw New" value={breakdown.new} />
         <CountPill label="Raw Recurring" value={breakdown.recurring} />
         <CountPill label="Raw Changed" value={breakdown.changed} />
@@ -89,11 +93,17 @@ function ScanCard({ scan }: { scan: Scan }) {
   );
 }
 
-function CountPill({ label, value }: { label: string; value: number }) {
+function CountPill({ label, value, tone = "default" }: { label: string; value: number; tone?: "default" | "rose" | "amber" | "blue" }) {
+  const tones = {
+    default: "border-line bg-panel-soft text-ink",
+    rose: "border-rose/30 bg-rose-dim text-rose",
+    amber: "border-amber/30 bg-amber-dim text-amber",
+    blue: "border-blue/30 bg-blue-dim text-blue"
+  };
   return (
-    <span className="rounded-2xl border border-line bg-panel-soft px-4 py-3 text-center">
+    <span className={`rounded-2xl border px-4 py-3 text-center ${tones[tone]}`}>
       <span className="block text-xs uppercase tracking-[0.18em] text-muted">{label}</span>
-      <span className="mt-1 block font-mono text-lg text-ink">{value}</span>
+      <span className="mt-1 block font-mono text-lg">{value}</span>
     </span>
   );
 }

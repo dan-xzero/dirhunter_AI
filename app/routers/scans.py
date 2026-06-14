@@ -2,10 +2,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.auth import Actor, current_actor
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.db import get_session
-from app.models import Finding, Scan
+from app.models import Finding, Scan, TechDetection
 from app.schemas import ScanCreateIn, ScanOut
+from app.services.criticality import attach_criticality
 from app.services.scan_runner import enqueue_scan
 
 router = APIRouter(prefix="/api/scans", tags=["scans"])
@@ -21,8 +23,9 @@ async def list_scans(
     result = await session.execute(select(Scan).order_by(Scan.started_at.desc()).limit(limit).offset(offset))
     scans = list(result.scalars())
     breakdowns = await _status_breakdowns(session, [scan.id for scan in scans])
+    criticality_breakdowns = await _criticality_breakdowns(session, [scan.id for scan in scans])
     return {
-        "items": [_scan_out(scan, breakdowns.get(scan.id)) for scan in scans],
+        "items": [_scan_out(scan, breakdowns.get(scan.id), criticality_breakdowns.get(scan.id)) for scan in scans],
         "total": total,
         "limit": limit,
         "offset": offset,
@@ -35,7 +38,8 @@ async def get_scan(scan_id: int, session: AsyncSession = Depends(get_session)) -
     if not scan:
         raise HTTPException(status_code=404, detail="scan not found")
     breakdowns = await _status_breakdowns(session, [scan_id])
-    return _scan_out(scan, breakdowns.get(scan_id))
+    criticality_breakdowns = await _criticality_breakdowns(session, [scan_id])
+    return _scan_out(scan, breakdowns.get(scan_id), criticality_breakdowns.get(scan_id))
 
 
 @router.post("", response_model=ScanOut)
@@ -51,11 +55,15 @@ async def create_scan_record(
     scan = await session.get(Scan, scan_id)
     if not scan:
         raise HTTPException(status_code=500, detail="scan creation failed")
-    return _scan_out(scan, _empty_breakdown())
+    return _scan_out(scan, _empty_breakdown(), _empty_criticality_breakdown())
 
 
 def _empty_breakdown() -> dict[str, int]:
     return {"new": 0, "recurring": 0, "changed": 0}
+
+
+def _empty_criticality_breakdown() -> dict[str, int]:
+    return {"critical": 0, "high": 0, "medium": 0, "low": 0}
 
 
 def _normalized_breakdown(raw: dict[str, int] | None) -> dict[str, int]:
@@ -83,7 +91,35 @@ async def _status_breakdowns(session: AsyncSession, scan_ids: list[int]) -> dict
     return {scan_id: _normalized_breakdown(raw.get(scan_id)) for scan_id in scan_ids}
 
 
-def _scan_out(scan: Scan, breakdown: dict[str, int] | None) -> dict:
+async def _criticality_breakdowns(session: AsyncSession, scan_ids: list[int]) -> dict[int, dict[str, int]]:
+    if not scan_ids:
+        return {}
+    result = await session.execute(
+        select(Finding)
+        .where(Finding.scan_id.in_(scan_ids))
+        .options(
+            selectinload(Finding.domain),
+            selectinload(Finding.validation),
+            selectinload(Finding.triage_events),
+            selectinload(Finding.secrets),
+            selectinload(Finding.tech_detections).selectinload(TechDetection.cves),
+        )
+    )
+    output = {scan_id: _empty_criticality_breakdown() for scan_id in scan_ids}
+    for finding in result.scalars().unique():
+        if finding.scan_id is None:
+            continue
+        attach_criticality(finding)
+        output.setdefault(finding.scan_id, _empty_criticality_breakdown())[finding.criticality] += 1
+    return output
+
+
+def _scan_out(
+    scan: Scan,
+    breakdown: dict[str, int] | None,
+    criticality_breakdown: dict[str, int] | None = None,
+) -> dict:
     payload = ScanOut.model_validate(scan).model_dump(mode="json")
     payload["status_breakdown"] = breakdown or _empty_breakdown()
+    payload["criticality_breakdown"] = criticality_breakdown or _empty_criticality_breakdown()
     return payload

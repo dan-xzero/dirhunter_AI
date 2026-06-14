@@ -4,7 +4,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
-import { useVirtualizer } from "@tanstack/react-virtual";
 import { RefreshCcw, Search, SlidersHorizontal } from "lucide-react";
 import { Chip } from "@/components/chip";
 import { FindingPanel } from "@/components/finding-panel";
@@ -22,6 +21,7 @@ type Filters = {
   verdict: string;
   triage: string;
   tag: string;
+  criticality: string;
   includeLikelyFp: boolean;
   includeUnvalidated: boolean;
   offset: number;
@@ -33,7 +33,6 @@ export function FindingsWorkbench({ scanId }: { scanId?: string }) {
   const searchParams = useSearchParams();
   const pathname = usePathname();
   const router = useRouter();
-  const parentRef = useRef<HTMLDivElement>(null);
   const findingParam = searchParams.get("finding");
   const linkedFindingId = findingParam && Number.isFinite(Number(findingParam)) ? Number(findingParam) : null;
 
@@ -44,6 +43,7 @@ export function FindingsWorkbench({ scanId }: { scanId?: string }) {
       verdict: searchParams.get("verdict") ?? "",
       triage: searchParams.get("triage") ?? "",
       tag: searchParams.get("tag") ?? "",
+      criticality: searchParams.get("criticality") ?? "",
       includeLikelyFp: searchParams.get("include_likely_fp") === "true",
       includeUnvalidated: searchParams.get("include_unvalidated") === "true",
       offset: Number(searchParams.get("offset") ?? "0") || 0
@@ -57,6 +57,7 @@ export function FindingsWorkbench({ scanId }: { scanId?: string }) {
     Boolean(filters.verdict) ||
     Boolean(filters.triage) ||
     Boolean(filters.tag) ||
+    Boolean(filters.criticality) ||
     filters.includeLikelyFp ||
     filters.includeUnvalidated;
 
@@ -131,6 +132,7 @@ export function FindingsWorkbench({ scanId }: { scanId?: string }) {
         verdict: filters.verdict,
         triage: filters.triage,
         tag: filters.tag,
+        criticality: filters.criticality,
         include_likely_fp: filters.includeLikelyFp,
         include_unvalidated: filters.includeUnvalidated,
         limit: PAGE_SIZE,
@@ -156,13 +158,6 @@ export function FindingsWorkbench({ scanId }: { scanId?: string }) {
 
   const rows = query.data?.items ?? [];
   const total = query.data?.total ?? 0;
-  const rowVirtualizer = useVirtualizer({
-    count: rows.length,
-    getScrollElement: () => parentRef.current,
-    estimateSize: () => 74,
-    overscan: 8
-  });
-  const virtualRows = rowVirtualizer.getVirtualItems();
   const showingStart = total === 0 ? 0 : filters.offset + 1;
   const showingEnd = Math.min(filters.offset + rows.length, total);
   const canPrev = filters.offset > 0;
@@ -220,6 +215,17 @@ export function FindingsWorkbench({ scanId }: { scanId?: string }) {
           <option value="likely_fp">Likely FP</option>
           <option value="inconclusive">Inconclusive</option>
         </FilterSelect>
+        <FilterSelect
+          label="Criticality"
+          value={filters.criticality}
+          onChange={(criticality) => setFilter("criticality", criticality)}
+        >
+          <option value="">All</option>
+          <option value="critical">Critical</option>
+          <option value="high">High</option>
+          <option value="medium">Medium</option>
+          <option value="low">Low</option>
+        </FilterSelect>
         <FilterSelect label="Category" value={filters.tag} onChange={(tag) => setFilter("tag", tag)}>
           <option value="">All</option>
           {TAG_OPTIONS.map((tag) => (
@@ -274,15 +280,12 @@ export function FindingsWorkbench({ scanId }: { scanId?: string }) {
 
         {showResults ? (
           <div
-            className="hidden grid-cols-[1.1fr_0.8fr_1fr_0.6fr_0.7fr_1.7fr] gap-3 border-b border-line bg-obsidian/80 px-5 py-3 text-xs uppercase tracking-[0.18em] text-muted lg:grid"
+            className="hidden grid-cols-[minmax(0,2.2fr)_minmax(18rem,1fr)_minmax(15rem,0.85fr)] gap-5 border-b border-line bg-obsidian/80 px-5 py-3 text-xs uppercase tracking-[0.18em] text-muted lg:grid"
             role="row"
           >
-            <span>Domain</span>
-            <span>Category</span>
-            <span>Review State</span>
-            <span>Confidence</span>
-            <span>Signals</span>
-            <span>URL</span>
+            <span>Endpoint</span>
+            <span>Criticality & review</span>
+            <span>Evidence summary</span>
           </div>
         ) : null}
 
@@ -331,30 +334,10 @@ export function FindingsWorkbench({ scanId }: { scanId?: string }) {
 
         {showResults ? (
           <>
-            <div ref={parentRef} className="thin-scrollbar hidden h-[calc(100vh-18rem)] overflow-auto lg:block">
-              <div className="relative" style={{ height: rowVirtualizer.getTotalSize() }}>
-                {virtualRows.map((virtualRow) => {
-                  const finding = rows[virtualRow.index];
-                  return (
-                    <button
-                      key={finding.id}
-                      type="button"
-                      onClick={() => setSelectedFinding(finding)}
-                      className="absolute left-0 grid w-full grid-cols-[1.1fr_0.8fr_1fr_0.6fr_0.7fr_1.7fr] gap-3 border-b border-line/70 px-5 py-3 text-left text-sm transition hover:bg-teal-dim"
-                      style={{ transform: `translateY(${virtualRow.start}px)`, minHeight: virtualRow.size }}
-                    >
-                      <DomainCell finding={finding} />
-                      <span className="self-center">
-                        <Chip value={finding.ai_tag} />
-                      </span>
-                      <ReviewState finding={finding} />
-                      <Confidence finding={finding} />
-                      <Signals finding={finding} />
-                      <span className="self-center truncate font-mono text-xs text-muted">{finding.url}</span>
-                    </button>
-                  );
-                })}
-              </div>
+            <div className="thin-scrollbar hidden max-h-[calc(100vh-18rem)] overflow-auto lg:block">
+              {rows.map((finding) => (
+                <FindingRow key={finding.id} finding={finding} onSelect={() => setSelectedFinding(finding)} />
+              ))}
             </div>
 
             <ul className="divide-y divide-line/70 lg:hidden">
@@ -400,6 +383,7 @@ export function FindingsWorkbench({ scanId }: { scanId?: string }) {
 }
 
 function FindingCard({ finding, onSelect }: { finding: Finding; onSelect: () => void }) {
+  const criticality = getCriticality(finding);
   return (
     <button
       type="button"
@@ -408,25 +392,74 @@ function FindingCard({ finding, onSelect }: { finding: Finding; onSelect: () => 
     >
       <div className="flex items-start justify-between gap-3">
         <span className="min-w-0">
-          <span className="block truncate font-medium text-ink">{finding.domain.host}</span>
-          <span className="mt-1 block truncate font-mono text-xs text-muted">{finding.url}</span>
+          <span className="block font-medium text-ink">{finding.domain.host}</span>
+          <span className="mt-1 block break-all font-mono text-xs leading-relaxed text-muted">{finding.url}</span>
         </span>
-        <Confidence finding={finding} />
+        <CriticalityBadge criticality={criticality} />
       </div>
       <div className="flex flex-wrap items-center gap-2">
         <Chip value={finding.ai_tag} />
         <Chip value={finding.finding_status} />
         <Chip value={finding.triage_events.at(-1)?.label ?? finding.validation?.llm_verdict ?? "not_validated"} />
+        <Confidence finding={finding} />
       </div>
+      <EvidenceReason finding={finding} />
       <Signals finding={finding} />
     </button>
   );
 }
 
-function DomainCell({ finding }: { finding: Finding }) {
+function FindingRow({ finding, onSelect }: { finding: Finding; onSelect: () => void }) {
+  const criticality = getCriticality(finding);
   return (
-    <span className="min-w-0 self-center">
-      <span className="block truncate font-medium text-ink">{finding.domain.host}</span>
+    <button
+      type="button"
+      onClick={onSelect}
+      className="grid w-full grid-cols-[minmax(0,2.2fr)_minmax(18rem,1fr)_minmax(15rem,0.85fr)] gap-5 border-b border-line/70 px-5 py-4 text-left text-sm transition hover:bg-teal-dim"
+    >
+      <EndpointCell finding={finding} />
+      <span className="flex min-w-0 flex-col gap-2 self-start">
+        <span className="flex flex-wrap items-center gap-2">
+          <CriticalityBadge criticality={criticality} />
+          <Confidence finding={finding} />
+        </span>
+        <ReviewState finding={finding} />
+        <span className="flex flex-wrap items-center gap-1.5">
+          <Chip value={finding.ai_tag} />
+          {finding.validation?.category_corrected ? (
+            <span className="rounded-full border border-blue/30 bg-blue-dim px-2 py-1 text-xs font-medium text-blue">
+              {finding.validation.category_corrected}
+            </span>
+          ) : null}
+        </span>
+      </span>
+      <span className="flex min-w-0 flex-col gap-2 self-start">
+        <Signals finding={finding} />
+        <EvidenceReason finding={finding} />
+        <span className="text-xs text-muted">{criticality.reason}</span>
+      </span>
+    </button>
+  );
+}
+
+function EndpointCell({ finding }: { finding: Finding }) {
+  return (
+    <span className="min-w-0 self-start">
+      <span className="flex flex-wrap items-center gap-2">
+        <span className="font-medium text-ink">{finding.domain.host}</span>
+        {typeof finding.status_code === "number" ? (
+          <span className="rounded-full border border-line-hard bg-panel-soft px-2 py-0.5 font-mono text-[11px] text-muted">
+            HTTP {finding.status_code}
+          </span>
+        ) : null}
+        {typeof finding.content_length === "number" ? (
+          <span className="rounded-full border border-line-hard bg-panel-soft px-2 py-0.5 font-mono text-[11px] text-muted">
+            {formatBytes(finding.content_length)}
+          </span>
+        ) : null}
+      </span>
+      <span className="mt-2 block break-all font-mono text-xs leading-relaxed text-ink/90">{finding.url}</span>
+      {finding.path ? <span className="mt-1 block break-all text-xs text-muted">Path: {finding.path}</span> : null}
     </span>
   );
 }
@@ -448,6 +481,7 @@ function matchesFilters(finding: Finding, filters: Filters, scanId?: string) {
   if (scanId && finding.scan_id !== Number(scanId)) return false;
   if (filters.status && finding.finding_status !== filters.status) return false;
   if (filters.tag && finding.ai_tag !== filters.tag) return false;
+  if (filters.criticality && finding.criticality !== filters.criticality) return false;
 
   if (filters.triage) {
     if (latestTriage?.label !== filters.triage) return false;
@@ -474,7 +508,7 @@ function matchesFilters(finding: Finding, filters: Filters, scanId?: string) {
 function Confidence({ finding }: { finding: Finding }) {
   const confidence = finding.validation?.llm_confidence;
   return (
-    <span className="self-center font-mono text-sm text-ink">
+    <span className="self-center whitespace-nowrap font-mono text-sm text-ink">
       {typeof confidence === "number" ? `${Math.round(confidence * 100)}%` : "-"}
     </span>
   );
@@ -482,12 +516,17 @@ function Confidence({ finding }: { finding: Finding }) {
 
 function Signals({ finding }: { finding: Finding }) {
   const cveCount = finding.tech_detections.reduce((sum, tech) => sum + tech.cves.length, 0);
+  const hasDownload = Object.keys(finding.download_meta || {}).length > 0;
   return (
     <span className="flex flex-wrap gap-1 self-center text-xs">
       {finding.secrets.length > 0 ? <SignalBadge tone="rose" label={`${finding.secrets.length} secrets`} /> : null}
       {cveCount > 0 ? <SignalBadge tone="amber" label={`${cveCount} CVEs`} /> : null}
       {finding.screenshot_path ? <SignalBadge tone="blue" label="shot" /> : null}
-      {finding.secrets.length === 0 && cveCount === 0 && !finding.screenshot_path ? <span className="text-muted">-</span> : null}
+      {hasDownload ? <SignalBadge tone="amber" label="download" /> : null}
+      {finding.content_changed ? <SignalBadge tone="amber" label="changed body" /> : null}
+      {finding.secrets.length === 0 && cveCount === 0 && !finding.screenshot_path && !hasDownload && !finding.content_changed ? (
+        <span className="text-muted">No extra signals</span>
+      ) : null}
     </span>
   );
 }
@@ -499,6 +538,52 @@ function SignalBadge({ label, tone }: { label: string; tone: "rose" | "amber" | 
     blue: "border-blue/30 bg-blue-dim text-blue"
   };
   return <span className={`rounded-full border px-2 py-1 ${tones[tone]}`}>{label}</span>;
+}
+
+type Criticality = {
+  level: "critical" | "high" | "medium" | "low";
+  label: string;
+  reason: string;
+};
+
+function getCriticality(finding: Finding): Criticality {
+  const level = ["critical", "high", "medium", "low"].includes(finding.criticality)
+    ? (finding.criticality as Criticality["level"])
+    : "low";
+  return {
+    level,
+    label: level.charAt(0).toUpperCase() + level.slice(1),
+    reason: finding.criticality_reason || "Low confidence or low-impact signal."
+  };
+}
+
+function CriticalityBadge({ criticality }: { criticality: Criticality }) {
+  const tones = {
+    critical: "border-rose/60 bg-rose/20 text-rose shadow-[0_0_18px_rgba(244,63,94,0.18)]",
+    high: "border-amber/55 bg-amber-dim text-amber",
+    medium: "border-blue/45 bg-blue-dim text-blue",
+    low: "border-line-hard bg-panel-soft text-muted"
+  };
+  return (
+    <span className={`inline-flex w-fit items-center rounded-full border px-2.5 py-1 text-xs font-semibold ${tones[criticality.level]}`}>
+      {criticality.label}
+    </span>
+  );
+}
+
+function EvidenceReason({ finding }: { finding: Finding }) {
+  const reason =
+    finding.validation?.category_corrected ||
+    finding.validation?.llm_reasoning ||
+    finding.body_excerpt ||
+    "Open the finding for full response evidence.";
+  return <span className="line-clamp-3 text-xs leading-relaxed text-muted">{reason}</span>;
+}
+
+function formatBytes(value: number) {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function Toggle({

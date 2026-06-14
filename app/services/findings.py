@@ -24,6 +24,7 @@ from app.models import (
     Secret,
     TechDetection,
 )
+from app.services.criticality import attach_criticality, criticality_rank
 from app.services.serialization import body_excerpt_from_finding, clean_text, json_safe
 from utils.ai_analyzer import get_category_priority
 
@@ -90,7 +91,8 @@ async def update_scan_state(
     clear_finished_at: bool = False,
 ) -> None:
     async with SessionLocal() as session:
-        scan = await session.get(Scan, scan_id)
+        result = await session.execute(select(Scan).where(Scan.id == scan_id).with_for_update())
+        scan = result.scalar_one_or_none()
         if not scan:
             return
         if status is not None:
@@ -137,7 +139,8 @@ async def persist_batch(scan_id: int | None, all_results: dict[str, list[dict[st
                 await _replace_child_records(session, finding, item)
 
         if scan_id:
-            scan = await session.get(Scan, scan_id)
+            result = await session.execute(select(Scan).where(Scan.id == scan_id).with_for_update())
+            scan = result.scalar_one_or_none()
             if scan:
                 scan.stats = {
                     **(scan.stats or {}),
@@ -375,6 +378,7 @@ async def list_findings(
     tag: str | None = None,
     triage: str | None = None,
     verdict: str | None = None,
+    criticality: str | None = None,
     include_likely_fp: bool = False,
     include_unvalidated: bool = False,
     q: str | None = None,
@@ -388,26 +392,24 @@ async def list_findings(
         tag=tag,
         triage=triage,
         verdict=verdict,
+        criticality=criticality,
         include_likely_fp=include_likely_fp,
         include_unvalidated=include_unvalidated,
         q=q,
     )
-    id_subquery = stmt.with_only_columns(Finding.id).order_by(None).subquery()
-    count_stmt = select(func.count(func.distinct(id_subquery.c.id))).select_from(id_subquery)
-    total = (await session.execute(count_stmt)).scalar_one()
-    result = await session.execute(
-        stmt.options(
-            selectinload(Finding.domain),
-            selectinload(Finding.validation),
-            selectinload(Finding.triage_events),
-            selectinload(Finding.secrets),
-            selectinload(Finding.tech_detections).selectinload(TechDetection.cves),
-        )
-        .order_by(Finding.last_seen.desc(), Finding.id.desc())
-        .limit(limit)
-        .offset(offset)
+    options = (
+        selectinload(Finding.domain),
+        selectinload(Finding.validation),
+        selectinload(Finding.triage_events),
+        selectinload(Finding.secrets),
+        selectinload(Finding.tech_detections).selectinload(TechDetection.cves),
     )
-    return list(result.scalars().unique()), total
+    result = await session.execute(stmt.options(*options).order_by(Finding.last_seen.desc(), Finding.id.desc()))
+    scored = [attach_criticality(finding) for finding in result.scalars().unique()]
+    if criticality:
+        scored = [finding for finding in scored if finding.criticality == criticality]
+    scored.sort(key=lambda finding: (criticality_rank(finding.criticality), finding.criticality_score, finding.last_seen, finding.id), reverse=True)
+    return scored[offset : offset + limit], len(scored)
 
 
 def _findings_query(**filters) -> Select[tuple[Finding]]:

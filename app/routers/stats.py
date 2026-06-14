@@ -1,10 +1,12 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.db import get_session
-from app.models import Finding, FindingTriage, FindingValidation, Scan
+from app.models import Finding, FindingTriage, FindingValidation, Scan, TechDetection
 from app.schemas import OverviewStatsOut, ScanOut
+from app.services.criticality import attach_criticality
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])
 
@@ -95,6 +97,11 @@ async def overview(session: AsyncSession = Depends(get_session)) -> OverviewStat
             "recurring": latest_breakdown_dict.get("existing", 0),
             "changed": latest_breakdown_dict.get("changed", 0),
         }
+        latest_scan_payload["criticality_breakdown"] = await _criticality_breakdown(
+            session,
+            scan_id=latest_scan.id,
+            actionable_only=False,
+        )
 
     by_status = (
         await session.execute(
@@ -111,6 +118,7 @@ async def overview(session: AsyncSession = Depends(get_session)) -> OverviewStat
     by_verdict = (
         await session.execute(select(FindingValidation.llm_verdict, func.count()).group_by(FindingValidation.llm_verdict))
     ).all()
+    by_criticality = await _criticality_breakdown(session)
 
     return OverviewStatsOut(
         total_scans=total_scans,
@@ -127,4 +135,42 @@ async def overview(session: AsyncSession = Depends(get_session)) -> OverviewStat
         by_status=dict(by_status),
         raw_by_status=dict(raw_by_status),
         by_verdict=dict(by_verdict),
+        by_criticality=by_criticality,
     )
+
+
+async def _criticality_breakdown(
+    session: AsyncSession,
+    scan_id: int | None = None,
+    actionable_only: bool = True,
+) -> dict[str, int]:
+    latest_triage_label = (
+        select(FindingTriage.label)
+        .where(FindingTriage.finding_id == Finding.id)
+        .order_by(FindingTriage.labeled_at.desc(), FindingTriage.id.desc())
+        .limit(1)
+        .correlate(Finding)
+        .scalar_subquery()
+    )
+    stmt = select(Finding).options(
+        selectinload(Finding.domain),
+        selectinload(Finding.validation),
+        selectinload(Finding.triage_events),
+        selectinload(Finding.secrets),
+        selectinload(Finding.tech_detections).selectinload(TechDetection.cves),
+    )
+    if actionable_only:
+        stmt = (
+            stmt.join(FindingValidation, FindingValidation.finding_id == Finding.id)
+            .where(FindingValidation.llm_verdict != "likely_fp")
+            .where(or_(latest_triage_label.is_(None), latest_triage_label != "fp"))
+        )
+    if scan_id is not None:
+        stmt = stmt.where(Finding.scan_id == scan_id)
+
+    result = await session.execute(stmt)
+    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    for finding in result.scalars().unique():
+        attach_criticality(finding)
+        counts[finding.criticality] += 1
+    return counts

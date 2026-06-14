@@ -37,6 +37,7 @@ export type FindingFilters = {
   tag?: string;
   triage?: string;
   verdict?: string;
+  criticality?: string;
   include_likely_fp?: boolean;
   include_unvalidated?: boolean;
   q?: string;

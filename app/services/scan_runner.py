@@ -135,7 +135,7 @@ async def _run_scan_process(
     env = os.environ.copy()
     env["USE_PG"] = "1"
     env["SCAN_ID"] = str(scan_id)
-    env.setdefault("USE_LEGACY_HTML", "1")
+    env.setdefault("USE_LEGACY_HTML", "0")
     if partial:
         env["DIRHUNTER_PARTIAL_SCAN"] = "1"
 
@@ -216,7 +216,8 @@ async def _mark_domain(
     urls_scanned: int | None = None,
 ) -> str | None:
     async with SessionLocal() as session:
-        scan = await session.get(Scan, scan_id)
+        result = await session.execute(select(Scan).where(Scan.id == scan_id).with_for_update())
+        scan = result.scalar_one_or_none()
         if not scan:
             return None
 
@@ -283,7 +284,8 @@ async def _mark_domain(
 
 async def _mark_scan_if_finished(scan_id: int) -> str | None:
     async with SessionLocal() as session:
-        scan = await session.get(Scan, scan_id)
+        result = await session.execute(select(Scan).where(Scan.id == scan_id).with_for_update())
+        scan = result.scalar_one_or_none()
         if not scan:
             return None
         stats = dict(scan.stats or {})
