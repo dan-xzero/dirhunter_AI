@@ -911,8 +911,8 @@ def main():
             ip_address = socket.gethostbyname(hostname)
             dashboard_url = f"http://{ip_address}/results/html/dashboard.html"
         
-        # Send start scan notification to Slack
-        if WEBHOOK_URL and WEBHOOK_URL.lower() != "none" and not partial_pg_scan:
+        # New Slack mode sends the structured completion digest only; avoid legacy-format start messages.
+        if WEBHOOK_URL and WEBHOOK_URL.lower() != "none" and not USE_NEW_SLACK and not partial_pg_scan:
             total_domains = len(domains_with_wordlists)
             start_message = (
                 f":mag: *DirHunter AI Scan Started*\n"

@@ -53,6 +53,7 @@ async def send_digest(scan_id: int, webhook_url: str | None = None) -> bool:
         return False
 
     urls_scanned = int((scan.stats or {}).get("urls_scanned") or 0)
+    outcome = _scan_outcome(scan)
     critical = [
         item for item in findings if item.criticality in {"critical", "high"} and item.finding_status in {"new", "changed"}
     ][:5]
@@ -68,15 +69,16 @@ async def send_digest(scan_id: int, webhook_url: str | None = None) -> bool:
     ]
 
     blocks: list[dict[str, Any]] = [
-        {"type": "header", "text": {"type": "plain_text", "text": f"DirHunter scan #{scan.id} complete"}},
+        {"type": "header", "text": {"type": "plain_text", "text": f"DirHunter scan #{scan.id} {outcome['headline']}"}},
         {
             "type": "section",
             "fields": [
-                {"type": "mrkdwn", "text": f"*Status*\n`{scan.status}`"},
+                {"type": "mrkdwn", "text": f"*Status*\n`{outcome['status']}`"},
                 {"type": "mrkdwn", "text": f"*Findings*\n`{len(findings)}`"},
                 {"type": "mrkdwn", "text": f"*URLs scanned*\n`{urls_scanned}`"},
                 {"type": "mrkdwn", "text": f"*Critical*\n`{len(critical)}`"},
                 {"type": "mrkdwn", "text": f"*Needs triage*\n`{len(needs_triage)}`"},
+                {"type": "mrkdwn", "text": f"*Skipped domains*\n`{outcome['skipped']}`"},
             ],
         },
         {
@@ -92,6 +94,9 @@ async def send_digest(scan_id: int, webhook_url: str | None = None) -> bool:
             },
         },
     ]
+
+    if outcome["skipped"]:
+        blocks.extend(_skip_section(outcome))
 
     blocks.extend(_section("Critical", critical))
     blocks.extend(_section("Needs Triage", needs_triage))
@@ -117,6 +122,86 @@ async def send_digest(scan_id: int, webhook_url: str | None = None) -> bool:
         timeout=20,
     )
     return response.status_code == 200
+
+
+def _scan_outcome(scan: Scan) -> dict[str, Any]:
+    stats = scan.stats or {}
+    domain_status = stats.get("domain_status") or {}
+    domain_errors = stats.get("domain_errors") or {}
+    total = int(stats.get("domains_total") or len(domain_status) or 0)
+    completed = _count_domain_status(domain_status, "completed")
+    failed = _count_domain_status(domain_status, "failed")
+    running = _count_domain_status(domain_status, "running")
+    queued = _count_domain_status(domain_status, "queued")
+    partial_domain_failure = stats.get("error") == "domain_failures" and completed > 0 and failed > 0
+
+    if partial_domain_failure:
+        status = "completed_with_skips"
+        headline = "completed with skipped domains"
+    elif scan.status == "failed":
+        status = "failed"
+        headline = "failed"
+    elif scan.status == "completed":
+        status = "completed"
+        headline = "complete"
+    else:
+        status = scan.status
+        headline = scan.status
+
+    reason = _skip_reason(domain_errors) if failed else ""
+    return {
+        "status": status,
+        "headline": headline,
+        "completed": completed,
+        "skipped": failed,
+        "running": running,
+        "queued": queued,
+        "total": total,
+        "reason": reason,
+        "samples": list(domain_errors.items())[:5],
+    }
+
+
+def _count_domain_status(domain_status: dict[str, Any], status: str) -> int:
+    return sum(1 for value in domain_status.values() if value == status)
+
+
+def _skip_reason(domain_errors: dict[str, Any]) -> str:
+    if not domain_errors:
+        return "Some domains did not finish, but completed-domain findings are still valid."
+
+    timeout_count = sum(1 for error in domain_errors.values() if str(error).startswith("timeout:"))
+    invalid_count = sum(1 for domain in domain_errors if _looks_dns_validation_record(domain))
+    exit_count = sum(1 for error in domain_errors.values() if str(error).startswith("exit_code:"))
+    reasons: list[str] = []
+    if timeout_count:
+        reasons.append(f"{timeout_count} timed out")
+    if invalid_count:
+        reasons.append(f"{invalid_count} invalid DNS/validation records")
+    remaining = len(domain_errors) - timeout_count - invalid_count
+    if remaining > 0 and exit_count:
+        reasons.append(f"{remaining} DNS/HTTP validation failures")
+    if not reasons:
+        reasons.append("domain-level scanner failures")
+    return "; ".join(reasons) + ". Completed-domain findings are still valid."
+
+
+def _looks_dns_validation_record(domain: str) -> bool:
+    value = domain.lower()
+    return value.startswith("_") or "\\052" in value or value.startswith("*") or "._" in value
+
+
+def _skip_section(outcome: dict[str, Any]) -> list[dict[str, Any]]:
+    total = outcome["total"] or outcome["completed"] + outcome["skipped"] + outcome["running"] + outcome["queued"]
+    sample_lines = [f"- `{domain}`: `{error}`" for domain, error in outcome["samples"]]
+    sample_text = "\n".join(sample_lines) if sample_lines else "No sample available."
+    text = (
+        f"*Skipped domains*\n"
+        f"{outcome['skipped']} of {total} domains were skipped/failed at domain level.\n"
+        f"Reason: {outcome['reason']}\n"
+        f"Sample:\n{sample_text}"
+    )
+    return [{"type": "section", "text": {"type": "mrkdwn", "text": text[:3000]}}]
 
 
 def _section(title: str, findings: list[Finding]) -> list[dict[str, Any]]:
