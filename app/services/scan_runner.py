@@ -24,6 +24,14 @@ PROD_HOST_RE = re.compile(r"(^|[.-])prod($|[.-])|production|^api-prod", re.IGNOR
 PROD_PATH_RE = re.compile(r"(^|/)prod($|/|-)", re.IGNORECASE)
 
 
+class ScanProcessTimeout(RuntimeError):
+    def __init__(self, scan_id: int, timeout_seconds: int, pid: int | None) -> None:
+        super().__init__(f"scan {scan_id} exceeded subprocess timeout of {timeout_seconds}s")
+        self.scan_id = scan_id
+        self.timeout_seconds = timeout_seconds
+        self.pid = pid
+
+
 def build_scan_command(scan_id: int, domains: str | None = None, wordlist: str | None = None, args: list[str] | None = None) -> list[str]:
     command = [sys.executable, "main_optimized.py"]
     if domains:
@@ -55,6 +63,14 @@ async def enqueue_scan_resume(scan_id: int, *, reason: str = "manual") -> bool:
         stats = dict(scan.stats or {})
         for key in ("exit_code", "error"):
             stats.pop(key, None)
+        if reason.startswith("stale"):
+            domain_status = dict(stats.get("domain_status") or {})
+            stats["domain_status"] = {
+                domain: ("queued" if status == "running" else status) for domain, status in domain_status.items()
+            }
+            stats["domains_running"] = 0
+            stats["active_domain"] = None
+            stats["active_domains"] = []
         attempts = int(stats.get("resume_attempts") or 0) + 1
         stats.update(
             {
@@ -83,7 +99,11 @@ async def run_scan(ctx: dict[str, Any], scan_id: int, domains: str | None, wordl
         await run_scan_domain(ctx, scan_id, domain_items[0], wordlist, args)
         return
 
-    code, pid = await _run_scan_process(scan_id, domains, wordlist, args, partial=False)
+    try:
+        code, pid = await _run_scan_process(scan_id, domains, wordlist, args, partial=False)
+    except ScanProcessTimeout as exc:
+        await complete_scan(scan_id, status="failed", stats={"error": f"timeout:{exc.timeout_seconds}s", "pid": exc.pid})
+        raise
     if code != 0:
         await complete_scan(scan_id, status="failed", stats={"exit_code": code, "pid": pid})
         raise RuntimeError(f"scan {scan_id} failed with exit code {code}")
@@ -101,6 +121,17 @@ async def run_scan_domain(
     await _mark_domain(scan_id, domain, "running")
     try:
         code, pid = await _run_scan_process(scan_id, domain, wordlist, args, partial=True)
+    except ScanProcessTimeout as exc:
+        final_status = await _mark_domain(
+            scan_id,
+            domain,
+            "failed",
+            error=f"timeout:{exc.timeout_seconds}s",
+            pid=exc.pid,
+        )
+        if final_status:
+            await _send_slack_digest_if_enabled(scan_id)
+        return
     except asyncio.CancelledError:
         final_status = await _mark_domain(scan_id, domain, "failed", error="worker_timeout")
         if final_status:
@@ -157,23 +188,36 @@ async def _run_scan_process(
         env=env,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
+        start_new_session=True,
     )
     await update_scan_state(scan_id, stats={"pid": process.pid})
-    assert process.stdout is not None
-    last_heartbeat = 0.0
+    timeout_seconds = _scan_process_timeout_seconds(partial)
     try:
-        async for line in process.stdout:
-            print(line.decode(errors="replace").rstrip())
-            now = time.monotonic()
-            if now - last_heartbeat >= 10:
-                await update_scan_state(scan_id, stats={"last_log_at": _utcnow_iso(), "pid": process.pid})
-                last_heartbeat = now
-        code = await process.wait()
+        code = await asyncio.wait_for(_stream_process_output(scan_id, process), timeout=timeout_seconds)
+    except asyncio.TimeoutError:
+        await _terminate_process(process)
+        raise ScanProcessTimeout(scan_id, timeout_seconds, process.pid) from None
     except asyncio.CancelledError:
         await _terminate_process(process)
         raise
-
     return code, process.pid
+
+
+async def _stream_process_output(scan_id: int, process: asyncio.subprocess.Process) -> int:
+    assert process.stdout is not None
+    last_heartbeat = 0.0
+    while True:
+        chunk = await process.stdout.read(8192)
+        if not chunk:
+            break
+        text = chunk.decode(errors="replace").rstrip()
+        if text:
+            print(text)
+        now = time.monotonic()
+        if now - last_heartbeat >= 10:
+            await update_scan_state(scan_id, stats={"last_log_at": _utcnow_iso(), "pid": process.pid})
+            last_heartbeat = now
+    return await process.wait()
 
 
 async def _enqueue_domain_jobs(scan_id: int, domains: list[str], wordlist: str | None, args: list[str]) -> None:
@@ -234,6 +278,8 @@ async def _mark_domain(
             domain_urls_scanned[domain] = int(urls_scanned)
         if error:
             domain_errors[domain] = error
+        elif status in {"running", "completed"}:
+            domain_errors.pop(domain, None)
 
         total_domains = int(stats.get("domains_total") or len(domain_status) or 1)
         completed = sum(1 for value in domain_status.values() if value == "completed")
@@ -382,12 +428,13 @@ def _utcnow_iso() -> str:
 async def _terminate_process(process: asyncio.subprocess.Process) -> None:
     if process.returncode is not None:
         return
+    pid = process.pid
     try:
-        process.send_signal(signal.SIGTERM)
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
         await asyncio.wait_for(process.wait(), timeout=10)
     except Exception:
         try:
-            process.kill()
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
         except ProcessLookupError:
             pass
         try:
@@ -396,8 +443,17 @@ async def _terminate_process(process: asyncio.subprocess.Process) -> None:
             pass
 
 
+def _scan_process_timeout_seconds(partial: bool) -> int:
+    key = "DIRHUNTER_DOMAIN_TIMEOUT_SECONDS" if partial else "DIRHUNTER_SCAN_TIMEOUT_SECONDS"
+    default = "1800" if partial else "7200"
+    try:
+        return max(60, int(os.getenv(key, default)))
+    except ValueError:
+        return int(default)
+
+
 class WorkerSettings:
     functions = [run_scan, run_scan_domain]
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
-    job_timeout = 1800
+    job_timeout = int(os.getenv("DIRHUNTER_WORKER_JOB_TIMEOUT", "2100"))
     max_jobs = int(os.getenv("DIRHUNTER_WORKER_MAX_JOBS", "2"))
