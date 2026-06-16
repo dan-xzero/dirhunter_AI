@@ -370,10 +370,47 @@ async def _send_slack_digest_if_enabled(scan_id: int) -> None:
         try:
             from app.services.slack import send_digest
 
+            if not await _claim_slack_digest(scan_id):
+                print(f"Slack digest already sent or claimed for scan {scan_id}")
+                return
             sent = await send_digest(scan_id, os.environ.get("WEBHOOK_URL"))
+            await _mark_slack_digest_result(scan_id, sent)
             print("Slack digest sent successfully" if sent else "Slack digest failed")
         except Exception as exc:
+            await _mark_slack_digest_result(scan_id, False, error=str(exc))
             print(f"Slack digest failed with exception: {exc}")
+
+
+async def _claim_slack_digest(scan_id: int) -> bool:
+    async with SessionLocal() as session:
+        result = await session.execute(select(Scan).where(Scan.id == scan_id).with_for_update())
+        scan = result.scalar_one_or_none()
+        if not scan:
+            return False
+        stats = dict(scan.stats or {})
+        if stats.get("slack_digest_sent_at") or stats.get("slack_digest_claimed_at"):
+            return False
+        stats["slack_digest_claimed_at"] = _utcnow_iso()
+        scan.stats = stats
+        await session.commit()
+        return True
+
+
+async def _mark_slack_digest_result(scan_id: int, sent: bool, error: str | None = None) -> None:
+    async with SessionLocal() as session:
+        result = await session.execute(select(Scan).where(Scan.id == scan_id).with_for_update())
+        scan = result.scalar_one_or_none()
+        if not scan:
+            return
+        stats = dict(scan.stats or {})
+        if sent:
+            stats["slack_digest_sent_at"] = _utcnow_iso()
+            stats.pop("slack_digest_error", None)
+        else:
+            stats.pop("slack_digest_claimed_at", None)
+            stats["slack_digest_error"] = error or "send_failed"
+        scan.stats = stats
+        await session.commit()
 
 
 def _split_domains(domains: str | None) -> list[str]:

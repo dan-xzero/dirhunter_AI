@@ -54,18 +54,22 @@ async def send_digest(scan_id: int, webhook_url: str | None = None) -> bool:
 
     urls_scanned = int((scan.stats or {}).get("urls_scanned") or 0)
     outcome = _scan_outcome(scan)
-    critical = [
-        item for item in findings if item.criticality in {"critical", "high"} and item.finding_status in {"new", "changed"}
-    ][:5]
+    actionable = [item for item in findings if not _is_suppressed(item)]
+    critical_findings = [
+        item for item in actionable if item.criticality == "critical" and item.finding_status in {"new", "changed"}
+    ]
+    high_findings = [
+        item for item in actionable if item.criticality == "high" and item.finding_status in {"new", "changed"}
+    ]
     needs_triage = [
         item
-        for item in findings
+        for item in actionable
         if not item.validation or item.validation.llm_verdict == "inconclusive"
-    ][:5]
+    ]
     suppressed = [
         item
         for item in findings
-        if item.validation and item.validation.llm_verdict == "likely_fp" and item.validation.llm_confidence >= 0.85
+        if _is_suppressed(item) and item.validation and item.validation.llm_confidence >= 0.85
     ]
 
     blocks: list[dict[str, Any]] = [
@@ -76,7 +80,8 @@ async def send_digest(scan_id: int, webhook_url: str | None = None) -> bool:
                 {"type": "mrkdwn", "text": f"*Status*\n`{outcome['status']}`"},
                 {"type": "mrkdwn", "text": f"*Findings*\n`{len(findings)}`"},
                 {"type": "mrkdwn", "text": f"*URLs scanned*\n`{urls_scanned}`"},
-                {"type": "mrkdwn", "text": f"*Critical*\n`{len(critical)}`"},
+                {"type": "mrkdwn", "text": f"*Critical*\n`{len(critical_findings)}`"},
+                {"type": "mrkdwn", "text": f"*High*\n`{len(high_findings)}`"},
                 {"type": "mrkdwn", "text": f"*Needs triage*\n`{len(needs_triage)}`"},
                 {"type": "mrkdwn", "text": f"*Skipped domains*\n`{outcome['skipped']}`"},
             ],
@@ -89,7 +94,9 @@ async def send_digest(scan_id: int, webhook_url: str | None = None) -> bool:
                     f"*Links*\n"
                     f"Scan: <{settings.effective_portal_url}/scans/{scan.id}|open scan>\n"
                     f"Dashboard: <{settings.effective_portal_url}|open dashboard>\n"
-                    f"Findings queue: <{settings.effective_portal_url}/findings|open findings>"
+                    f"Findings queue: <{settings.effective_portal_url}/findings|open findings>\n"
+                    f"High priority: <{settings.effective_portal_url}/findings?criticality=high|open high>\n"
+                    f"Needs triage: <{settings.effective_portal_url}/findings?verdict=inconclusive|open triage>"
                 ),
             },
         },
@@ -98,8 +105,22 @@ async def send_digest(scan_id: int, webhook_url: str | None = None) -> bool:
     if outcome["skipped"]:
         blocks.extend(_skip_section(outcome))
 
-    blocks.extend(_section("Critical", critical))
-    blocks.extend(_section("Needs Triage", needs_triage))
+    if critical_findings:
+        blocks.extend(_section("Critical", critical_findings[:3]))
+    blocks.append(
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": (
+                        "Finding details are summarized in the portal to reduce Slack false-positive noise. "
+                        "Use the links above for evidence and triage."
+                    ),
+                }
+            ],
+        }
+    )
     blocks.append(
         {
             "type": "context",
@@ -114,7 +135,10 @@ async def send_digest(scan_id: int, webhook_url: str | None = None) -> bool:
     response = requests.post(
         webhook,
         json={
-            "text": f"DirHunter scan #{scan.id}: {len(findings)} findings, {len(needs_triage)} need triage",
+            "text": (
+                f"DirHunter scan #{scan.id}: {len(findings)} findings, "
+                f"{len(high_findings)} high, {len(needs_triage)} need triage"
+            ),
             "blocks": blocks[:50],
             "unfurl_links": False,
             "unfurl_media": False,
@@ -164,6 +188,12 @@ def _scan_outcome(scan: Scan) -> dict[str, Any]:
 
 def _count_domain_status(domain_status: dict[str, Any], status: str) -> int:
     return sum(1 for value in domain_status.values() if value == status)
+
+
+def _is_suppressed(finding: Finding) -> bool:
+    latest_triage = finding.triage_events[-1].label if finding.triage_events else None
+    verdict = finding.validation.llm_verdict if finding.validation else None
+    return latest_triage == "fp" or verdict == "likely_fp"
 
 
 def _skip_reason(domain_errors: dict[str, Any]) -> str:

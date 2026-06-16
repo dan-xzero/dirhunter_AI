@@ -44,6 +44,8 @@ async def find_resume_candidates(stale_minutes: int, max_attempts: int) -> list[
                 continue
             pid = _as_pid(stats.get("pid"))
             if scan.status == "failed":
+                if _is_terminal_domain_failure(stats):
+                    continue
                 candidates.append((scan.id, "failed", pid))
                 continue
             if scan.status == "running" and scan.started_at and scan.started_at < cutoff:
@@ -95,6 +97,18 @@ def _has_stale_running_domains(stats: dict, cutoff: datetime) -> bool:
         return False
     heartbeat = _parse_dt(stats.get("last_log_at")) or _parse_dt(stats.get("worker_started_at"))
     return heartbeat is not None and heartbeat < cutoff
+
+
+def _is_terminal_domain_failure(stats: dict) -> bool:
+    if stats.get("error") != "domain_failures":
+        return False
+    domain_status = stats.get("domain_status") or {}
+    total = int(stats.get("domains_total") or len(domain_status) or 0)
+    if not total:
+        return False
+    completed = sum(1 for status in domain_status.values() if status == "completed")
+    failed = sum(1 for status in domain_status.values() if status == "failed")
+    return completed > 0 and failed > 0 and completed + failed >= total
 
 
 def _parse_dt(value: object) -> datetime | None:
